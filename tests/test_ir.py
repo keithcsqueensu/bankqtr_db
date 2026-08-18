@@ -492,6 +492,43 @@ def test_zions_chart_axis_labels_are_not_a_balance() -> None:
     )
 
 
+def test_html_fallback_can_add_a_column_the_panel_never_had() -> None:
+    """Office CRE has no XBRL column waiting for it, in any filing.
+
+    The HTML path used to fill only columns the panel already carried, so a
+    disclosure it exists to recover -- one no filing tags -- was parsed,
+    scaled and then silently dropped on the way in.
+    """
+    panel = reconcile.reconcile(_panel())
+    assert "loans_office_cre" not in panel.columns
+
+    wide = pl.DataFrame(
+        {
+            "ticker": ["RF"],
+            "period": [dt.date(2026, 6, 30)],
+            "loans_office_cre": [12_447e6],
+        }
+    )
+    out = reconcile.fill_gaps(panel, wide, source="html")
+    assert out["loans_office_cre"][0] == 12_447e6
+    assert out["loans_office_cre__source"][0] == "html"
+
+
+def test_fill_gaps_never_overwrites_an_earlier_source() -> None:
+    """XBRL first, then HTML, then the supplements -- only nulls are written."""
+    panel = reconcile.reconcile(_panel())
+    wide = pl.DataFrame(
+        {
+            "ticker": ["RF"],
+            "period": [dt.date(2026, 6, 30)],
+            "loans_total": [1.0],
+        }
+    )
+    out = reconcile.fill_gaps(panel, wide, source="html")
+    assert out["loans_total"][0] == 100_000_000_000.0
+    assert out["loans_total__source"][0] == "xbrl"
+
+
 def test_bank_of_america_has_no_office_spec() -> None:
     """BAC names office CRE constantly and measures it never.
 

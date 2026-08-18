@@ -152,7 +152,7 @@ Which variables are obtainable differs sharply by category:
 | Investment-grade share, risk-rating distribution | XBRL dimensional | GSIBs mostly; regionals use the pass/criticized ladder instead |
 | Delinquency buckets | XBRL dimensional | good |
 | Owner-occupied vs investor CRE | XBRL where broken out, else HTML | partial |
-| Office CRE exposure | IR presentations + supplements | 4 banks, 4 different disclosures — see below |
+| Office CRE exposure | IR decks (4 banks) + 10-K property-type table (2) | 6 banks — see below |
 | Leveraged lending | — | **not extracted**; every pattern read something else |
 | Small business | IR supplements + XBRL | 2 banks |
 
@@ -323,32 +323,36 @@ Three honest limits:
   | CFG | a sentence: "CRE General Office portfolio of $3.4 billion" | 6 quarters; 3.7 → 2.52 ($bn) |
   | USB | no balance since 2Q23, only the CRE split by property class | 6 quarters of `office_cre_share_of_cre`; 13% → 9% |
 
-  **Bank of America is the instructive absence.** It names office CRE in every
-  quarter's materials — "net charge-offs ... driven by commercial real estate
-  office" — but only ever as the *explanation* of a number, never as one. No
-  balance, share or ratio appears in its deck or supplement, and its two most
-  recent decks do not mention offices at all. A spec for it could only invent a
-  figure, which is exactly how the first version of this module came to record
-  7.87 billion *shares* as $7.9bn of office exposure.
+  **Bank of America and M&T come from the 10-K instead.** Neither publishes
+  office exposure in its earnings deck — Bank of America names it in every
+  quarter's materials but only ever as the *explanation* of a number ("net
+  charge-offs ... driven by commercial real estate office"), never as one. It
+  is not in the 10-Q either, and its XBRL instance carries no office member and
+  no property-type axis at all.
 
-  Three details that each cost a wrong number to find. Citizens' magnitude word
-  belongs to the figure, not the page — consuming "billion" inside the match
-  left a $3.4bn book scaled by the document's "in millions" caption. Regions'
-  block always leads with its balance, so a quarter yielding only a charge-off
-  has matched something else. And US Bancorp's later decks are PDFs whose text
-  extraction interleaves characters from adjacent boxes, out of which the
-  office share read 21% and 19% against a real trend of 13, 13, 13, 12, 10, 9 —
-  so the legend's slices must still sum to 100 or nothing is taken from it.
+  It is in the **10-K**, as a table: "Outstanding Commercial Real Estate Loans
+  by Geographic Region and Property Type". `html_fallback.CRE_PROPERTY_TYPE`
+  reads it, which is squarely that module's remit — its docstring already named
+  office CRE as a target. Annual rather than quarterly, so the values land at
+  Q4:
 
-  Citizens' allowance is deliberately left alone: its memo line puts the
-  **prior** quarter first, the reverse of every other schedule here. And
-  `office_cre_share_of_cre` is never *derived*, only taken where a bank states
-  it — deriving it needs a complete CRE denominator, and Regions has one in two
-  quarters out of nine, understated enough to report a ~15% share as 31%.
-  `office_cre_pct`, against total loans, carries the cross-bank comparison.
+  | Bank | Recovered | Cross-check |
+  |---|---|---|
+  | BAC | 5 of 6 year-ends; 17.7 → 12.4 ($bn), 1.9% → 1.05% of loans | 15,061 − 12,447 = 2,614 vs the prose "decreased $2.6 billion, or 17 percent" |
+  | MTB | 2023–2025; 4.73 → 3.42 ($bn) | maturity buckets sum to the total taken, all three years |
 
-  Adding a bank means reading its deck and confirming the block — not
-  loosening a pattern until something matches.
+  The two tables are laid out differently — BAC's columns are years, M&T's are
+  maturity buckets followed by a total — so both were checked row by row
+  against the filings rather than assumed. M&T's population is its "permanent
+  finance" CRE, a narrower book than the consolidated CRE line, so its office
+  share of loans is not strictly comparable with Bank of America's.
+
+  BAC's 2022 year-end is absent: too few rows in that filing snapped to a
+  plausible multiplier, so the scale could not be established and the row was
+  dropped rather than guessed — the same rule the rest of the HTML path uses.
+
+  Six other large banks were checked for the same table and have none, so the
+  spec does not contaminate anyone it was not verified against.
 
 - **Leveraged lending is not extracted at all.** Every pattern tried against it
   read something else: Goldman's *net revenues* ($58.28bn), Citizens' *average

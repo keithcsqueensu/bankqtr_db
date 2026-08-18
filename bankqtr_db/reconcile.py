@@ -151,7 +151,20 @@ def reconcile(
         log.info("no HTML rows survived scale resolution")
         return out
 
-    wide = (
+    wide = _widen(resolved)
+    incoming = [c for c in wide.columns if c not in ("ticker", "period")]
+    wide = _reject_implausible(panel, wide, incoming)
+    return fill_gaps(out, wide, source="html")
+
+
+# --------------------------------------------------------------------------
+# Filling
+# --------------------------------------------------------------------------
+
+
+def _widen(resolved: pl.DataFrame) -> pl.DataFrame:
+    """One row per bank-quarter, one column per variable, best reading kept."""
+    return (
         resolved.sort(["confidence", "filed"], descending=True, nulls_last=True)
         .unique(
             subset=["ticker", "period", "variable"], keep="first", maintain_order=True
@@ -159,26 +172,61 @@ def reconcile(
         .pivot(on="variable", index=["ticker", "period"], values="value")
     )
 
-    fillable = [c for c in wide.columns if c in numeric]
-    if not fillable:
-        return out
+
+def fill_gaps(
+    panel: pl.DataFrame,
+    wide: pl.DataFrame,
+    *,
+    source: str,
+    suffix: str = "__fill",
+) -> pl.DataFrame:
+    """Fill null cells from ``wide`` and tag each filled cell with ``source``.
+
+    Adds columns the panel has never had.  Both fallbacks need that and for the
+    same reason: the disclosures they exist to recover are the ones no filing
+    tags, so there is no XBRL column waiting for them.  Office CRE is the case
+    in point -- Bank of America's instance document carries no office member
+    and no property-type axis at all, so the value has nowhere to land unless
+    the column is created here.
+
+    Only nulls are written, so an earlier and more authoritative source is
+    never overwritten -- XBRL first, then HTML, then the IR supplements.
+    """
+    incoming = [c for c in wide.columns if c not in ("ticker", "period")]
+    if not incoming:
+        return panel
+
+    out = panel
+    missing = [c for c in incoming if c not in out.columns]
+    if missing:
+        out = out.with_columns(
+            [pl.lit(None, dtype=pl.Float64).alias(c) for c in missing]
+            + [
+                pl.lit(None, dtype=pl.String).alias(f"{c}__source")
+                for c in missing
+                if f"{c}__source" not in out.columns
+            ]
+        )
 
     out = out.join(
-        wide.select(["ticker", "period", *fillable]).rename(
-            {c: f"{c}__html" for c in fillable}
+        wide.select(["ticker", "period", *incoming]).rename(
+            {c: f"{c}{suffix}" for c in incoming}
         ),
         on=["ticker", "period"],
         how="left",
     )
-    for col in fillable:
+    for col in incoming:
+        source_col = f"{col}__source"
+        if source_col not in out.columns:
+            out = out.with_columns(pl.lit(None, dtype=pl.String).alias(source_col))
         out = out.with_columns(
-            pl.when(pl.col(col).is_null() & pl.col(f"{col}__html").is_not_null())
-            .then(pl.lit("html"))
-            .otherwise(pl.col(f"{col}__source"))
-            .alias(f"{col}__source"),
-            pl.col(col).fill_null(pl.col(f"{col}__html")).alias(col),
+            pl.when(pl.col(col).is_null() & pl.col(f"{col}{suffix}").is_not_null())
+            .then(pl.lit(source))
+            .otherwise(pl.col(source_col))
+            .alias(source_col),
+            pl.col(col).fill_null(pl.col(f"{col}{suffix}")).alias(col),
         )
-    return out.drop([f"{c}__html" for c in fillable])
+    return out.drop([f"{c}{suffix}" for c in incoming])
 
 
 # --------------------------------------------------------------------------
@@ -253,46 +301,16 @@ def merge_ir(
         log.info("no IR rows survived scale resolution")
         return panel
 
-    wide = (
-        resolved.sort(["confidence", "filed"], descending=True, nulls_last=True)
-        .unique(
-            subset=["ticker", "period", "variable"], keep="first", maintain_order=True
-        )
-        .pivot(on="variable", index=["ticker", "period"], values="value")
-    )
+    wide = _widen(resolved)
     incoming = [c for c in wide.columns if c not in ("ticker", "period")]
     if not incoming:
         return panel
 
-    out = panel
-    # Columns the panel has never seen need to exist before they can be filled.
-    missing = [c for c in incoming if c not in out.columns]
-    if missing:
-        out = out.with_columns(
-            [pl.lit(None, dtype=pl.Float64).alias(c) for c in missing]
-            + [pl.lit(None, dtype=pl.String).alias(f"{c}__source") for c in missing]
-        )
-
-    out = out.join(
-        wide.select(["ticker", "period", *incoming]).rename(
-            {c: f"{c}__ir" for c in incoming}
-        ),
-        on=["ticker", "period"],
-        how="left",
-    )
-    out = _reject_implausible(out, incoming)
-    for col in incoming:
-        source = f"{col}__source"
-        if source not in out.columns:
-            out = out.with_columns(pl.lit(None, dtype=pl.String).alias(source))
-        out = out.with_columns(
-            pl.when(pl.col(col).is_null() & pl.col(f"{col}__ir").is_not_null())
-            .then(pl.lit("ir_supplement"))
-            .otherwise(pl.col(source))
-            .alias(source),
-            pl.col(col).fill_null(pl.col(f"{col}__ir")).alias(col),
-        )
-    return out.drop([f"{c}__ir" for c in incoming])
+    # Refuse the impossible before it is written, not after: a slice of the
+    # loan book cannot exceed the loan book, and a phrase pattern once read US
+    # Bancorp's leveraged lending as $1.18tn against a $381bn book.
+    wide = _reject_implausible(panel, wide, incoming)
+    return fill_gaps(panel, wide, source="ir_supplement")
 
 
 # Slice of the loan book, so it cannot exceed the loan book.  ``loans_total``
@@ -304,8 +322,10 @@ _SUBSET_OF_LOANS = ("loans_", "acl_", "nonaccrual_", "cq_", "pd_")
 _SUBSET_TOLERANCE = 1.05
 
 
-def _reject_implausible(out: pl.DataFrame, incoming: list[str]) -> pl.DataFrame:
-    """Blank IR values that cannot be true beside the loan book already known.
+def _reject_implausible(
+    panel: pl.DataFrame, wide: pl.DataFrame, incoming: list[str]
+) -> pl.DataFrame:
+    """Blank incoming values that cannot be true beside the known loan book.
 
     The last line of defence, and it earns its place: a loose phrase pattern
     read US Bancorp's leveraged lending as $1.18 *trillion* against a $381bn
@@ -313,33 +333,38 @@ def _reject_implausible(out: pl.DataFrame, incoming: list[str]) -> pl.DataFrame:
     scaled cleanly, it was the only reading of that slide, and the panel
     rendered it without complaint.
 
-    Only the incoming IR value is discarded; the column keeps whatever XBRL or
+    Only the incoming value is discarded; the column keeps whatever XBRL or
     HTML already put there, and the gap stays visible in the coverage report.
     """
-    if "loans_total" not in out.columns:
-        return out
+    if "loans_total" not in panel.columns:
+        return wide
 
     checked = [
-        c
-        for c in incoming
-        if c != "loans_total" and c.startswith(_SUBSET_OF_LOANS)
+        c for c in incoming if c != "loans_total" and c.startswith(_SUBSET_OF_LOANS)
     ]
     if not checked:
-        return out
+        return wide
 
-    ceiling = pl.col("loans_total").cast(pl.Float64) * _SUBSET_TOLERANCE
-    return out.with_columns(
-        [
-            pl.when(
-                pl.col("loans_total").is_not_null()
-                & (pl.col("loans_total") > 0)
-                & (pl.col(f"{c}__ir").abs() > ceiling)
-            )
-            .then(None)
-            .otherwise(pl.col(f"{c}__ir"))
-            .alias(f"{c}__ir")
-            for c in checked
-        ]
+    book = panel.select(
+        "ticker", "period", pl.col("loans_total").alias("_book")
+    ).unique(subset=["ticker", "period"], keep="first")
+    ceiling = pl.col("_book").cast(pl.Float64) * _SUBSET_TOLERANCE
+    return (
+        wide.join(book, on=["ticker", "period"], how="left")
+        .with_columns(
+            [
+                pl.when(
+                    pl.col("_book").is_not_null()
+                    & (pl.col("_book") > 0)
+                    & (pl.col(c).abs() > ceiling)
+                )
+                .then(None)
+                .otherwise(pl.col(c))
+                .alias(c)
+                for c in checked
+            ]
+        )
+        .drop("_book")
     )
 
 

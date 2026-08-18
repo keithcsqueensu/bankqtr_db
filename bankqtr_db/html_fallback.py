@@ -156,11 +156,63 @@ EXCLUDE_LABEL = re.compile(
     re.IGNORECASE,
 )
 
+# The CRE book split by what the property is used for, which is where office
+# exposure lives when a bank discloses it at all in a filing.  It is tagged in
+# no XBRL instance -- Bank of America's carries no office member and no
+# property-type axis anywhere -- and it is absent from the 10-Q, so this table
+# in the 10-K is the only place the number exists.
+#
+# Bank of America's Table 33, "Outstanding Commercial Real Estate Loans by
+# Geographic Region and Property Type", gives Office at 12,447 for 2025, which
+# reconciles two independent ways against the MD&A prose beside it: "Office
+# loans decreased $2.6 billion, or 17 percent, during 2025" (15.0 -> 12.4) and
+# "represented approximately one percent of total loans" (12.4 / 1,090).
+#
+# The signals are the *other* property types on purpose.  "Office" alone is a
+# word that appears in every filing ("principal executive offices", "deposits
+# in U.S. offices"); a table that also names industrial/warehouse, multi-family
+# rental and shopping centres is unambiguously this schedule.
+CRE_PROPERTY_TYPE = TableSpec(
+    name="cre_property_type",
+    signals=(
+        "by property type",
+        "industrial / warehouse",
+        "industrial/warehouse",
+        "multi-family rental",
+        "shopping centers",
+        "hotel",
+        "non-residential",
+        "multi-use",
+    ),
+    min_hits=3,
+    row_map={
+        # Anchored: the same table has an "Other" row and a residential block,
+        # and the geographic half above it must not contribute anything.
+        r"^office$|^office loans?$|^office buildings?$": "loans_office_cre",
+        r"^multi.?family rental": "loans_multifamily",
+        r"^total outstanding commercial real estate loans?$": "loans_cre_total",
+    },
+)
+
+# Two banks publish this table and they lay it out differently, which is worth
+# knowing before extending the spec.  Bank of America's columns are years, so
+# the left-most number is the current one -- the rule this module already uses.
+# M&T's are maturity buckets followed by a total ("Office 408 809 872 1,024 310
+# $3,423 14%"), so the useful number is the total.  Both come out right, and
+# both were checked row by row against the filings: BAC 2019-2025 and M&T
+# 2023-2025, whose buckets sum to the total taken.  A third layout should be
+# verified the same way rather than assumed.
+#
+# M&T's population is its "permanent finance" CRE, which is a narrower book
+# than the consolidated CRE line, so its office share of loans is not strictly
+# comparable with Bank of America's.
+
 SPECS: tuple[TableSpec, ...] = (
     ACL_ROLLFORWARD,
     LOAN_PORTFOLIO,
     CREDIT_QUALITY,
     NONPERFORMING,
+    CRE_PROPERTY_TYPE,
 )
 
 
