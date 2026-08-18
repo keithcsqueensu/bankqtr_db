@@ -1,0 +1,13 @@
+# Cached EDGAR payloads: large, regenerable, and not ours to redistribute.
+data/raw/
+data/out/
+# Downloaded IR supplements and earnings decks -- same reasoning, and ~1.6 GB
+# of it.  Rebuild with scripts/fetch_ir.py.
+data/ir/
+
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.tmp
