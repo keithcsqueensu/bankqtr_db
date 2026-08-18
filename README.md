@@ -152,7 +152,7 @@ Which variables are obtainable differs sharply by category:
 | Investment-grade share, risk-rating distribution | XBRL dimensional | GSIBs mostly; regionals use the pass/criticized ladder instead |
 | Delinquency buckets | XBRL dimensional | good |
 | Owner-occupied vs investor CRE | XBRL where broken out, else HTML | partial |
-| Office CRE exposure | IR presentations + supplements | 3 banks, 3 different disclosures — see below |
+| Office CRE exposure | IR presentations + supplements | 4 banks, 4 different disclosures — see below |
 | Leveraged lending | — | **not extracted**; every pattern read something else |
 | Small business | IR supplements + XBRL | 2 banks |
 
@@ -301,7 +301,7 @@ owner-occupied/investor CRE split that XBRL only partly carries.
 
 Three honest limits:
 
-- **Office CRE reaches three banks, and each publishes something different.**
+- **Office CRE reaches four banks, and each publishes something different.**
   An early version reached five and four of them were wrong: it read Bank of
   America's *share count* (7.87 billion shares booked as $7.9bn of offices),
   Citizens' *allowance* in place of the balance it is held against, First
@@ -318,9 +318,18 @@ Three honest limits:
 
   | Bank | What it publishes | Recovered |
   |---|---|---|
-  | RF | a fixed "Key Portfolio Metrics" block — balance, NPL, ACL, charge-offs | 9 quarters; balance 1,504 → 858 ($m) |
+  | ZION | the balance inside the slide heading, `Office ($1.6B)`, twice per deck | 16 quarters; 2.3 → 1.6 ($bn), plus nonaccrual rate |
+  | RF | a fixed "Key Portfolio Metrics" block — balance, NPL, ACL, charge-offs | 9 quarters; 1,504 → 858 ($m) |
   | CFG | a sentence: "CRE General Office portfolio of $3.4 billion" | 6 quarters; 3.7 → 2.52 ($bn) |
   | USB | no balance since 2Q23, only the CRE split by property class | 6 quarters of `office_cre_share_of_cre`; 13% → 9% |
+
+  **Bank of America is the instructive absence.** It names office CRE in every
+  quarter's materials — "net charge-offs ... driven by commercial real estate
+  office" — but only ever as the *explanation* of a number, never as one. No
+  balance, share or ratio appears in its deck or supplement, and its two most
+  recent decks do not mention offices at all. A spec for it could only invent a
+  figure, which is exactly how the first version of this module came to record
+  7.87 billion *shares* as $7.9bn of office exposure.
 
   Three details that each cost a wrong number to find. Citizens' magnitude word
   belongs to the figure, not the page — consuming "billion" inside the match

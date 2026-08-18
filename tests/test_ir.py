@@ -455,6 +455,68 @@ def test_a_legend_that_no_longer_sums_to_100_is_refused() -> None:
     assert rows == []
 
 
+def test_zions_office_balance_is_read_from_the_slide_heading() -> None:
+    """Zions puts the balance inside the heading's own parentheses.
+
+    Anchoring on that "($" is what keeps it honest: the generic spec matched
+    the deck's *chart axis labels* ("Construction Balances Term Balances 0.1"),
+    which sit near the word office and carry a number.
+    """
+    slide = (
+        "Office ($1.6B) • Weighted average LTVs (< 60%) • 75% suburban and 25% "
+        "central business district • Average & median loan size of $4.4 million "
+        "& < $1 million • 7.8% criticized / classified; 2.3% nonaccrual; "
+        "1.1% delinquencies • Term office portfolio is 89% leased"
+    )
+    rows = ir_extract.extract_phrases(
+        slide, _doc_for("ZION", "Zions Bancorporation", "0000109380")
+    )
+    by_var = {r["variable"]: r for r in rows}
+    assert by_var["loans_office_cre"]["value"] == 1.6
+    assert by_var["loans_office_cre"]["declared_scale"] == 1e9
+    assert by_var["office_nonaccrual_ratio"]["value"] == 2.3
+    assert by_var["office_nonaccrual_ratio"]["declared_scale"] == 1.0
+
+
+def test_zions_chart_axis_labels_are_not_a_balance() -> None:
+    """What the generic spec read before the heading anchor existed."""
+    axes = (
+        "Office Portfolio Trends 4Q23 1Q24 2Q24 3Q24 4Q24 Balance Trends "
+        "Term Balances Construction Balances 0.1"
+    )
+    assert (
+        ir_extract.extract_phrases(
+            axes, _doc_for("ZION", "Zions Bancorporation", "0000109380")
+        )
+        == []
+    )
+
+
+def test_bank_of_america_has_no_office_spec() -> None:
+    """BAC names office CRE constantly and measures it never.
+
+    Every mention is the *explanation* of a number -- "net charge-offs ...
+    driven by commercial real estate office" -- and no balance, share or ratio
+    appears in its deck or supplement. A spec could only invent one, which is
+    how the first version of this module recorded 7.87 billion *shares* as
+    $7.9bn of office exposure.
+    """
+    allowlisted = {t for spec in ir_extract.PHRASE_SPECS for t in spec.tickers}
+    assert "BAC" not in allowlisted
+
+    narrative = (
+        "CRE Office • Net charge-offs of $350 million increased $263 million, "
+        "driven by commercial real estate office • Per Share Data "
+        "Common shares outstanding (in billions) 7.87"
+    )
+    assert (
+        ir_extract.extract_phrases(
+            narrative, _doc_for("BAC", "Bank of America", "0000070858")
+        )
+        == []
+    )
+
+
 def test_office_share_is_never_derived_from_a_partial_cre_book() -> None:
     """Deriving it needs a complete CRE denominator, and often there is none.
 

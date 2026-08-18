@@ -440,6 +440,38 @@ CFG_OFFICE = PhraseSpec(
     },
 )
 
+# Zions is the most machine-readable of the four: it puts the balance in the
+# heading itself, and prints it twice per deck --
+#
+#   "Office ($1.6B) - Weighted average LTVs (< 60%) - 75% suburban ...
+#    - 7.8% criticized / classified; 2.3% nonaccrual; 1.1% delinquencies"
+#   "IN-DEPTH REVIEW: CRE OFFICE ($1.6 BILLION BALANCE)"
+#
+# Anchoring on the "($" of that heading is what keeps it honest.  The generic
+# spec matched the deck's *chart axis labels* ("Construction Balances Term
+# Balances 0.1") because those sit near the word office and carry a number; a
+# balance printed inside the heading's own parentheses cannot be anything else.
+ZION_OFFICE = PhraseSpec(
+    name="office_cre_zion",
+    section=re.compile(r"(?:CRE )?OFFICE\s*\(\s*\$", re.IGNORECASE),
+    # Long enough to reach the credit bullet that follows the heading, short
+    # enough to stop before the next property type's.
+    window=320,
+    tickers=("ZION",),
+    require="loans_office_cre",
+    percent_fields=("office_nonaccrual_ratio",),
+    fields={
+        # The window opens immediately after "($", so the balance is the first
+        # thing in it.
+        "loans_office_cre": re.compile(
+            r"^\s*([\d.,]+)\s*(?=billion|b\b)", re.IGNORECASE
+        ),
+        "office_nonaccrual_ratio": re.compile(
+            r"([\d.]+)\s*%\s*nonaccrual", re.IGNORECASE
+        ),
+    },
+)
+
 # US Bancorp stopped publishing an office *balance* after 2Q23.  What it does
 # publish every quarter is the CRE book split by property class:
 #
@@ -486,13 +518,28 @@ USB_OFFICE_SHARE = PhraseSpec(
 # the three below are three genuinely different disclosures, not one pattern
 # stretched over three banks:
 #
-#   RF   a fixed "Key Portfolio Metrics" block, balance and NPL and ACL
-#   CFG  a sentence stating the balance, and nothing else usable
-#   USB  no balance at all since 2Q23, only the share of CRE
+#   RF    a fixed "Key Portfolio Metrics" block, balance and NPL and ACL
+#   CFG   a sentence stating the balance, and nothing else usable
+#   USB   no balance at all since 2Q23, only the share of CRE
+#   ZION  the balance inside the slide heading, plus a nonaccrual rate
+#
+# Bank of America is the instructive absence.  It mentions office CRE in every
+# quarter's materials -- "net charge-offs ... driven by commercial real estate
+# office" -- but only ever as the *explanation* of a number, never as one.  It
+# publishes no office balance, share or ratio anywhere in its earnings deck or
+# supplement, and its two most recent decks do not mention offices at all.  A
+# spec for it could only invent a figure, which is precisely how the first
+# version of this module came to record 7.87 billion *shares* as $7.9bn of
+# office exposure.
 #
 # Adding a bank means reading its deck and confirming the block, not loosening
 # a pattern until something matches.
-PHRASE_SPECS: tuple[PhraseSpec, ...] = (OFFICE_CRE, CFG_OFFICE, USB_OFFICE_SHARE)
+PHRASE_SPECS: tuple[PhraseSpec, ...] = (
+    OFFICE_CRE,
+    CFG_OFFICE,
+    USB_OFFICE_SHARE,
+    ZION_OFFICE,
+)
 
 
 # --------------------------------------------------------------------------
