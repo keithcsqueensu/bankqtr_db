@@ -320,12 +320,15 @@ RATIOS: tuple[RatioDef, ...] = (
         "loans_total",
         description="Office CRE as % of total loans (IR supplement)",
     ),
-    RatioDef(
-        "office_cre_share_of_cre",
-        "loans_office_cre",
-        "loans_cre_total",
-        description="Office as % of the CRE book (IR supplement)",
-    ),
+    # ``office_cre_share_of_cre`` is deliberately NOT a RatioDef.  Deriving it
+    # needs a complete CRE denominator and there often is not one: Regions'
+    # ``loans_cre_total`` exists in two quarters out of nine, and in those two
+    # it comes from the HTML fallback at $4.84bn against an investor-real-estate
+    # book nearer $9bn -- which turned a ~15% office share into 31%.  The column
+    # is still populated, but only where a bank *discloses* the share itself
+    # (US Bancorp prints its CRE split by property class every quarter).
+    # ``office_cre_pct`` carries the cross-bank comparison instead, because
+    # ``loans_total`` is populated for 99% of the panel.
     RatioDef(
         "office_nonaccrual_ratio",
         "nonaccrual_office_cre",

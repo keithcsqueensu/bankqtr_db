@@ -152,7 +152,7 @@ Which variables are obtainable differs sharply by category:
 | Investment-grade share, risk-rating distribution | XBRL dimensional | GSIBs mostly; regionals use the pass/criticized ladder instead |
 | Delinquency buckets | XBRL dimensional | good |
 | Owner-occupied vs investor CRE | XBRL where broken out, else HTML | partial |
-| Office CRE exposure | IR presentations | **Regions only** — see below |
+| Office CRE exposure | IR presentations + supplements | 3 banks, 3 different disclosures — see below |
 | Leveraged lending | — | **not extracted**; every pattern read something else |
 | Small business | IR supplements + XBRL | 2 banks |
 
@@ -301,22 +301,42 @@ owner-occupied/investor CRE split that XBRL only partly carries.
 
 Three honest limits:
 
-- **Office CRE reaches one bank, not five.** The first version reached five and
-  four of them were wrong: it read Bank of America's *share count* (7.87
-  billion shares booked as $7.9bn of offices), Citizens' *allowance* in place
-  of the balance it is held against, First Citizens' *venture* book, US
-  Bancorp's *NPA table*, and Zions' *chart axis labels*. Every value was
-  plausible, nothing raised, and the column looked well populated.
+- **Office CRE reaches three banks, and each publishes something different.**
+  An early version reached five and four of them were wrong: it read Bank of
+  America's *share count* (7.87 billion shares booked as $7.9bn of offices),
+  Citizens' *allowance* in place of the balance it is held against, First
+  Citizens' *venture* book, US Bancorp's *NPA table*, and Zions' *chart axis
+  labels*. Every value was plausible, nothing raised, and the column looked
+  well populated.
 
   The cause is structural. A statistical schedule has a caption, row labels and
   aligned columns to lean on; a slide has none, so the only evidence that a
-  number belongs to a heading is that it is printed nearby -- and "nearby" is
+  number belongs to a heading is that it is printed nearby — and "nearby" is
   worthless when the neighbouring caption is a share count. Phrase specs are
-  therefore an **allowlist**: they apply only to banks whose deck has been read
-  and checked. Regions qualifies because it prints a fixed "Key Portfolio
-  Metrics" block under its office heading every quarter. The resulting series
-  runs 1,504 → 1,418 → 1,362 → 1,433 → 1,277 → 1,020 → 907 → 858 ($m),
-  which is a bank running its office book down, and matches the slides.
+  therefore an **allowlist**: one spec per bank whose deck has been read and
+  checked, not one pattern stretched over the universe.
+
+  | Bank | What it publishes | Recovered |
+  |---|---|---|
+  | RF | a fixed "Key Portfolio Metrics" block — balance, NPL, ACL, charge-offs | 9 quarters; balance 1,504 → 858 ($m) |
+  | CFG | a sentence: "CRE General Office portfolio of $3.4 billion" | 6 quarters; 3.7 → 2.52 ($bn) |
+  | USB | no balance since 2Q23, only the CRE split by property class | 6 quarters of `office_cre_share_of_cre`; 13% → 9% |
+
+  Three details that each cost a wrong number to find. Citizens' magnitude word
+  belongs to the figure, not the page — consuming "billion" inside the match
+  left a $3.4bn book scaled by the document's "in millions" caption. Regions'
+  block always leads with its balance, so a quarter yielding only a charge-off
+  has matched something else. And US Bancorp's later decks are PDFs whose text
+  extraction interleaves characters from adjacent boxes, out of which the
+  office share read 21% and 19% against a real trend of 13, 13, 13, 12, 10, 9 —
+  so the legend's slices must still sum to 100 or nothing is taken from it.
+
+  Citizens' allowance is deliberately left alone: its memo line puts the
+  **prior** quarter first, the reverse of every other schedule here. And
+  `office_cre_share_of_cre` is never *derived*, only taken where a bank states
+  it — deriving it needs a complete CRE denominator, and Regions has one in two
+  quarters out of nine, understated enough to report a ~15% share as 31%.
+  `office_cre_pct`, against total loans, carries the cross-bank comparison.
 
   Adding a bank means reading its deck and confirming the block — not
   loosening a pattern until something matches.

@@ -304,6 +304,18 @@ class PhraseSpec:
     # ends, and running past the end is how the office block came to be read
     # from the multi-family slide that follows it.
     boundary: re.Pattern[str] | None = None
+    # Variables this spec reads as a *percentage* rather than an amount.  They
+    # need no scale and must never be given one.
+    percent_fields: tuple[str, ...] = field(default=())
+    # (pattern, low, high): the numbers matching ``pattern`` anywhere in the
+    # window must sum to within [low, high], or nothing is taken from it.  This
+    # is how a scrambled PDF is caught -- see :data:`USB_OFFICE_SHARE`.
+    sum_check: tuple[str, float, float] | None = None
+    # A variable without which the section is not the section.  Regions' block
+    # always leads with its balance, so a quarter that yields only a
+    # charge-off has matched something else -- 4Q24 produced a lone nco of 32
+    # off an "NPL Paying Current" caption.
+    require: str | None = None
 
 
 # A currency-marked number: "$858", "$ 7.4", "$1,832".  Requiring the "$" is
@@ -343,6 +355,7 @@ OFFICE_CRE = PhraseSpec(
     # order, every quarter.  No other bank in the universe does, which is the
     # whole reason this is an allowlist; see :data:`PHRASE_SPECS`.
     tickers=("RF",),
+    require="loans_office_cre",
     fields={
         # Anchored on the block, not on the word "Balances" alone.  The slide's
         # own prose says "Outstanding balances as of June 30" in its subtitle,
@@ -397,6 +410,66 @@ LEVERAGED = PhraseSpec(
     },
 )
 
+# Citizens states its office balance in a sentence rather than a metrics block:
+# "CRE General Office portfolio of $3.4 billion, down ~$200 million, or 6%, QoQ".
+# The sentence is the anchor, so the window is only as long as the clause.
+#
+# Its ACL is deliberately *not* taken.  That line reads "Memo: General Office
+# ACL $ 370 10.2 % $ 364 10.6 %" -- two periods side by side with the **prior**
+# quarter first, the reverse of every other schedule in this module, and the
+# accompanying prose confirms 10.6% is the current one.  A number that means
+# the opposite of what the surrounding convention implies is not worth taking
+# for one extra column.
+CFG_OFFICE = PhraseSpec(
+    name="office_cre_cfg",
+    section=re.compile(
+        r"(?:CRE )?General Office portfolio(?: of)?", re.IGNORECASE
+    ),
+    window=60,
+    tickers=("CFG",),
+    fields={
+        "loans_office_cre": re.compile(
+            r"^[\s,]*(?:of|totall?(?:ing|ed)?|was|is|at)?\s*"
+            # A lookahead, not a consuming group: the magnitude word has to
+            # still be there for ``_magnitude_after`` to read the unit off it.
+            # Consuming it left "$3.4 billion" scaled as millions, because the
+            # only unit left to find was the document's own caption.
+            r"\$\s*([\d.,]+)\s*(?=billion|million|bn\b|mm?\b)",
+            re.IGNORECASE,
+        ),
+    },
+)
+
+# US Bancorp stopped publishing an office *balance* after 2Q23.  What it does
+# publish every quarter is the CRE book split by property class:
+#
+#   "CRE by Property Class SFR Construction 7% Owner Occupied 21%
+#    Multi-Family 38% Office 9% Industrial 11% Other 14%"
+#
+# so the share is what gets extracted -- the disclosure as made, rather than a
+# balance multiplied out of it against an XBRL CRE total that may not cover the
+# same population.
+#
+# ``sum_check`` is what makes this safe.  US Bancorp's later decks are PDFs
+# whose text extraction interleaves characters from neighbouring boxes
+# ("oSnFfRid =en Stiinaglle Family Residential"), and out of that soup the
+# office share read 21% and 19% against a real trend of 13, 13, 13, 12, 10, 9.
+# A legend whose slices no longer sum to 100 has not been read correctly, and
+# nothing is taken from it.
+USB_OFFICE_SHARE = PhraseSpec(
+    name="office_share_usb",
+    section=re.compile(r"CRE by Property Class", re.IGNORECASE),
+    window=220,
+    tickers=("USB",),
+    percent_fields=("office_cre_share_of_cre",),
+    sum_check=(r"([\d.]+)\s*%", 95.0, 105.0),
+    fields={
+        "office_cre_share_of_cre": re.compile(
+            r"\bOffice\s+([\d.]+)\s*%", re.IGNORECASE
+        ),
+    },
+)
+
 # Phrase specs are an **allowlist**, not a general reader, and that is the
 # hard-won conclusion of this module.
 #
@@ -404,15 +477,22 @@ LEVERAGED = PhraseSpec(
 # labels, aligned columns.  A slide has none: the only evidence that a number
 # belongs to a heading is that it is printed near it, and "near" is worth
 # nothing when the neighbouring caption is a share count or a revenue line.
-# Run across all 31 banks, the office spec put Bank of America's *share count*
-# in the office column, Citizens' *allowance* in place of its balance, and
-# First Citizens' *venture* book in place of its offices -- four of five banks
-# wrong, every value plausible, nothing raised.
+# Run across all 31 banks, one generic office spec put Bank of America's *share
+# count* in the office column, Citizens' *allowance* in place of its balance,
+# and First Citizens' *venture* book in place of its offices -- four of five
+# banks wrong, every value plausible, nothing raised.
 #
-# So a spec applies only to banks whose layout has been read and checked.
-# Adding a bank means looking at its deck and confirming the block, not
-# loosening a pattern until something matches.
-PHRASE_SPECS: tuple[PhraseSpec, ...] = (OFFICE_CRE,)
+# So a spec applies only to banks whose layout has been read and checked, and
+# the three below are three genuinely different disclosures, not one pattern
+# stretched over three banks:
+#
+#   RF   a fixed "Key Portfolio Metrics" block, balance and NPL and ACL
+#   CFG  a sentence stating the balance, and nothing else usable
+#   USB  no balance at all since 2Q23, only the share of CRE
+#
+# Adding a bank means reading its deck and confirming the block, not loosening
+# a pattern until something matches.
+PHRASE_SPECS: tuple[PhraseSpec, ...] = (OFFICE_CRE, CFG_OFFICE, USB_OFFICE_SHARE)
 
 
 # --------------------------------------------------------------------------
@@ -1077,6 +1157,46 @@ def _page_line_rows(
 # Phrase extraction
 # --------------------------------------------------------------------------
 
+# A magnitude word straight after the figure, as prose writes it: "$3.4
+# billion".  This is a stronger unit statement than any caption -- it is
+# attached to the number itself -- so it wins where both are present.
+_MAGNITUDE_AFTER = re.compile(
+    r"^\s*(billion|bn|million|mm|thousand|[kmb])\b", re.IGNORECASE
+)
+_MAGNITUDE_VALUE = {
+    "billion": 1e9,
+    "bn": 1e9,
+    "b": 1e9,
+    "million": 1e6,
+    "mm": 1e6,
+    "m": 1e6,
+    "thousand": 1e3,
+    "k": 1e3,
+}
+
+
+def _magnitude_after(window: str, end: int) -> float | None:
+    """The unit written immediately after a figure, if there is one."""
+    match = _MAGNITUDE_AFTER.match(window[end:])
+    return _MAGNITUDE_VALUE.get(match.group(1).lower()) if match else None
+
+
+def _sums_check_out(window: str, spec: PhraseSpec) -> bool:
+    """Whether a window's parts add up to what the spec says they should.
+
+    A pie legend's slices sum to 100.  When they do not, the text was not read
+    correctly -- which is exactly what happens to US Bancorp's later decks,
+    where PDF extraction interleaves characters from adjacent boxes and the
+    office slice came out at 21% against a real trend of 13, 13, 13, 12, 10, 9.
+    """
+    if spec.sum_check is None:
+        return True
+    pattern, low, high = spec.sum_check
+    values = [_to_number(v) for v in re.findall(pattern, window)]
+    total = sum(v for v in values if v is not None)
+    return low <= total <= high
+
+
 # A "%" glued to the number means the phrase matched a ratio, not a balance.
 # It has to be glued: Regions' office slide reads "Balances $858 % of Total
 # Loans 0.9%", where the "%" after 858 opens the *next* caption rather than
@@ -1106,6 +1226,10 @@ def extract_phrases(text: str, doc: IRDoc) -> list[dict[str, Any]]:
                 edge = spec.boundary.search(window)
                 if edge is not None:
                     window = window[: edge.start()]
+            # A legend whose parts no longer add up has not been read
+            # correctly, whatever it looks like.
+            if not _sums_check_out(window, spec):
+                continue
             # A slide states its unit in its own caption ("$ in Millions"),
             # which is better evidence than anything inferable later.
             scale = declared_scale(window[:400]) or declared_scale(
@@ -1119,7 +1243,8 @@ def extract_phrases(text: str, doc: IRDoc) -> list[dict[str, Any]]:
                 raw = next((g for g in found.groups() if g), None)
                 if raw is None:
                     continue
-                if _PCT_SUFFIX.match(window[found.end() :]):
+                is_percent = variable in spec.percent_fields
+                if not is_percent and _PCT_SUFFIX.match(window[found.end() :]):
                     continue
                 # Whatever stands between the heading and the number decides
                 # whether the number is still about the heading.  On a slide,
@@ -1137,11 +1262,22 @@ def extract_phrases(text: str, doc: IRDoc) -> list[dict[str, Any]]:
                         "label": window[: found.end()][-80:].strip()[:120],
                         "value": float(value),
                         "table": spec.name,
-                        "declared_scale": scale,
+                        # A percentage has no scale and must never be given
+                        # one; a prose figure carries its own magnitude word
+                        # ("$3.4 billion"), which beats any caption.
+                        "declared_scale": (
+                            1.0
+                            if is_percent
+                            else (_magnitude_after(window, found.end()) or scale)
+                        ),
                         # Prose is read less confidently than a ruled table.
                         "confidence": 0.45,
                     }
                 )
+            if spec.require is not None and not any(
+                r["variable"] == spec.require for r in found_rows
+            ):
+                continue
             if found_rows:
                 rows.extend(found_rows)
                 break  # this section is the disclosure; later ones are neighbours

@@ -375,6 +375,115 @@ def test_phrase_specs_apply_only_to_banks_whose_layout_was_checked() -> None:
     assert ir_extract.extract_phrases(deck, bac) == []
 
 
+def _doc_for(ticker: str, bank: str, cik: str) -> ir.IRDoc:
+    return ir.IRDoc(
+        bank=bank,
+        ticker=ticker,
+        cik=cik,
+        year=2024,
+        quarter=1,
+        doc_type="presentation",
+        url=f"https://example.invalid/{ticker.lower()}.htm",
+        origin="edgar8k",
+    )
+
+
+def test_citizens_office_balance_is_read_from_prose_with_its_own_unit() -> None:
+    """Citizens states the balance in a sentence, not a metrics block.
+
+    The magnitude word belongs to the figure ("$3.4 billion") and beats the
+    document's own "in millions" caption. Consuming that word inside the match
+    left the balance scaled as millions -- a $3.4bn book recorded as $3.4m.
+    """
+    text = (
+        "$ in millions unless otherwise noted. "
+        "CRE General Office portfolio of $3.4 billion, down ~$200 million, "
+        "or 6%, QoQ driven by paydowns and charge-offs"
+    )
+    rows = ir_extract.extract_phrases(text, _doc_for("CFG", "Citizens Financial", "0000759944"))
+    by_var = {r["variable"]: r for r in rows}
+    assert by_var["loans_office_cre"]["value"] == 3.4
+    assert by_var["loans_office_cre"]["declared_scale"] == 1e9
+
+
+def test_citizens_two_period_acl_memo_is_not_read() -> None:
+    """That line puts the *prior* quarter first, unlike every other schedule.
+
+    "Memo: General Office ACL $ 370 10.2 % $ 364 10.6 %" is 4Q23 then 1Q24, and
+    the accompanying prose confirms 10.6% is current. Taking the first number
+    would report last quarter's allowance as this quarter's.
+    """
+    text = (
+        "CRE General Office portfolio of $3.4 billion QoQ. "
+        "Memo: General Office ACL $ 370 10.2 % $ 364 10.6 % NCOs $ 48 $ 89"
+    )
+    rows = ir_extract.extract_phrases(text, _doc_for("CFG", "Citizens Financial", "0000759944"))
+    assert {r["variable"] for r in rows} == {"loans_office_cre"}
+
+
+def test_us_bancorp_publishes_a_share_not_a_balance() -> None:
+    """US Bancorp stopped publishing an office balance after 2Q23.
+
+    What it prints is the CRE book split by property class, so that is what
+    gets taken -- the disclosure as made, rather than a balance multiplied out
+    against an XBRL CRE total covering a possibly different population.
+    """
+    legend = (
+        "CRE by Property Class SFR Construction 7% Owner Occupied 21% "
+        "Multi-Family 38% Office 9% Industrial 11% Other 14%"
+    )
+    rows = ir_extract.extract_phrases(legend, _doc_for("USB", "US Bancorp", "0000036104"))
+    by_var = {r["variable"]: r for r in rows}
+    assert by_var["office_cre_share_of_cre"]["value"] == 9.0
+    # A percentage has no scale and must never be given one.
+    assert by_var["office_cre_share_of_cre"]["declared_scale"] == 1.0
+    assert "loans_office_cre" not in by_var
+
+
+def test_a_legend_that_no_longer_sums_to_100_is_refused() -> None:
+    """US Bancorp's later decks are PDFs whose text extraction interleaves.
+
+    Out of that soup the office share read 21% and 19% against a real trend of
+    13, 13, 13, 12, 10, 9. A pie whose slices no longer add up has not been
+    read correctly, whatever it looks like.
+    """
+    scrambled = (
+        "CRE by Property Class SFR Construction 7% Owner Occupied 21% "
+        "Office 21% oSnFfRid en Stiinaglle 38% 90+ delinquencies 0.28 %"
+    )
+    rows = ir_extract.extract_phrases(scrambled, _doc_for("USB", "US Bancorp", "0000036104"))
+    assert rows == []
+
+
+def test_office_share_is_never_derived_from_a_partial_cre_book() -> None:
+    """Deriving it needs a complete CRE denominator, and often there is none.
+
+    Regions has a ``loans_cre_total`` in two quarters out of nine, and in those
+    two it is an HTML-fallback figure of $4.84bn against an investor-real-estate
+    book nearer $9bn -- which reported a ~15% office share as 31%.
+    """
+    from bankqtr_db import variables
+
+    assert "office_cre_share_of_cre" not in variables.BY_RATIO
+    # It is still a column the extractor may fill from a bank's own disclosure.
+    assert "office_cre_share_of_cre" in {
+        v for spec in ir_extract.PHRASE_SPECS for v in spec.fields
+    }
+
+
+def test_a_block_without_a_balance_is_not_the_block() -> None:
+    """Regions' metrics block always leads with its balance.
+
+    4Q24 otherwise produced a lone charge-off of 32 read off an "NPL Paying
+    Current" caption, with no balance anywhere near it.
+    """
+    stray = (
+        "CRE- Office Portfolio olio Loans 16.3% 10.6% 7.0% NPL Paying Current "
+        "57.0% 54.8% 77.4% Charge-offs $32"
+    )
+    assert ir_extract.extract_phrases(stray, _doc()) == []
+
+
 def test_leveraged_lending_is_not_extracted_at_all() -> None:
     """Every pattern tried against it read something else.
 
