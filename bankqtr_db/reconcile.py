@@ -154,7 +154,7 @@ def reconcile(
     wide = _widen(resolved)
     incoming = [c for c in wide.columns if c not in ("ticker", "period")]
     wide = _reject_implausible(panel, wide, incoming)
-    return fill_gaps(out, wide, source="html")
+    return fill_gaps(out, wide, source="html", allow_new=HTML_NEW_COLUMNS)
 
 
 # --------------------------------------------------------------------------
@@ -173,12 +173,23 @@ def _widen(resolved: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+# Columns the HTML fallback is allowed to create.  It parses more than this --
+# an ACL rollforward yields "acl_beginning", "acl_ending", "provision",
+# "recoveries", "charge_offs" -- but every one of those duplicates a concept
+# the panel already carries under its ``<var>_<category>`` naming, and shipping
+# both would leave a consumer choosing between two similarly named columns with
+# different coverage and no way to tell which is meant.  Only a disclosure with
+# no panel column at all comes through.
+HTML_NEW_COLUMNS: tuple[str, ...] = ("loans_office_cre",)
+
+
 def fill_gaps(
     panel: pl.DataFrame,
     wide: pl.DataFrame,
     *,
     source: str,
     suffix: str = "__fill",
+    allow_new: tuple[str, ...] | None = None,
 ) -> pl.DataFrame:
     """Fill null cells from ``wide`` and tag each filled cell with ``source``.
 
@@ -191,8 +202,14 @@ def fill_gaps(
 
     Only nulls are written, so an earlier and more authoritative source is
     never overwritten -- XBRL first, then HTML, then the IR supplements.
+
+    ``allow_new`` limits which absent columns may be created; ``None`` allows
+    any, which is what the IR path wants since every column it introduces was
+    defined for it.
     """
     incoming = [c for c in wide.columns if c not in ("ticker", "period")]
+    if allow_new is not None:
+        incoming = [c for c in incoming if c in panel.columns or c in allow_new]
     if not incoming:
         return panel
 
