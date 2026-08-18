@@ -99,7 +99,15 @@ def build_info(
         "panel": {
             "banks": len(banks),
             "bank_quarters": panel_df.height,
+            # Half the columns are the ``*__source`` companions, so the raw
+            # width is not the number of variables anyone is testing against.
             "columns": panel_df.width,
+            "value_columns": sum(
+                1
+                for c in panel_df.columns
+                if not c.endswith("__source")
+                and panel_df.schema[c] in (pl.Float64, pl.Int64)
+            ),
             "period_min": str(period.min()) if period is not None else None,
             "period_max": str(period.max()) if period is not None else None,
         },

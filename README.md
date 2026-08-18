@@ -152,8 +152,8 @@ Which variables are obtainable differs sharply by category:
 | Investment-grade share, risk-rating distribution | XBRL dimensional | GSIBs mostly; regionals use the pass/criticized ladder instead |
 | Delinquency buckets | XBRL dimensional | good |
 | Owner-occupied vs investor CRE | XBRL where broken out, else HTML | partial |
-| Office CRE exposure | IR presentations | 5 of the 20 banks it applies to |
-| Leveraged lending | IR presentations | **none** — mentioned constantly, quantified almost never |
+| Office CRE exposure | IR presentations | **Regions only** — see below |
+| Leveraged lending | — | **not extracted**; every pattern read something else |
 | Small business | IR supplements + XBRL | 2 banks |
 
 Two structural limits worth stating plainly:
@@ -301,17 +301,37 @@ owner-occupied/investor CRE split that XBRL only partly carries.
 
 Three honest limits:
 
-- **Office CRE reaches 5 banks** (BAC, CFG, FCNCA, RF, USB), not 20. Most banks
-  discuss office concentration without publishing a balance a parser can find.
-- **Leveraged lending reaches none.** A loose pattern did produce values — it
-  read US Bancorp's leveraged book at $1.18 trillion against a $381bn loan book
-  — and tightening it to require the figure be tied to the words themselves
-  leaves nothing. That is the correct outcome: the disclosure is qualitative at
-  almost every bank. The column exists and stays null.
-- Extraction is far better for regionals than for GSIBs and specialty lenders.
-  Wells Fargo, Zions, Regions, KeyCorp and Truist each yield 250–350 rows;
-  JPMorgan, Capital One and Ally yield a handful, because their supplements are
-  laid out differently and their loan disclosures are thinner.
+- **Office CRE reaches one bank, not five.** The first version reached five and
+  four of them were wrong: it read Bank of America's *share count* (7.87
+  billion shares booked as $7.9bn of offices), Citizens' *allowance* in place
+  of the balance it is held against, First Citizens' *venture* book, US
+  Bancorp's *NPA table*, and Zions' *chart axis labels*. Every value was
+  plausible, nothing raised, and the column looked well populated.
+
+  The cause is structural. A statistical schedule has a caption, row labels and
+  aligned columns to lean on; a slide has none, so the only evidence that a
+  number belongs to a heading is that it is printed nearby -- and "nearby" is
+  worthless when the neighbouring caption is a share count. Phrase specs are
+  therefore an **allowlist**: they apply only to banks whose deck has been read
+  and checked. Regions qualifies because it prints a fixed "Key Portfolio
+  Metrics" block under its office heading every quarter. The resulting series
+  runs 1,504 → 1,418 → 1,362 → 1,433 → 1,277 → 1,020 → 907 → 858 ($m),
+  which is a bank running its office book down, and matches the slides.
+
+  Adding a bank means reading its deck and confirming the block — not
+  loosening a pattern until something matches.
+
+- **Leveraged lending is not extracted at all.** Every pattern tried against it
+  read something else: Goldman's *net revenues* ($58.28bn), Citizens' *average
+  hold position* ($12m), PNC's *CLO securitizations*, First Citizens' *rail*
+  business, and, at its worst, US Bancorp's leveraged book at $1.18 **trillion**
+  against a $381bn loan book. The disclosure is qualitative at almost every
+  bank. The column exists and stays null, which is the correct answer.
+
+- **Extraction is far better for regionals than for GSIBs and specialty
+  lenders.** Wells Fargo, Zions, Regions, KeyCorp and Truist each yield 250–350
+  rows; JPMorgan, Capital One and Ally yield a handful, because their
+  supplements are laid out differently and their loan disclosures are thinner.
 
 ### What this stage does not do
 

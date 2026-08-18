@@ -291,9 +291,40 @@ class PhraseSpec:
     # variable -> pattern whose first group is the number
     fields: dict[str, re.Pattern[str]] = field(default_factory=dict)
     window: int = 1400
+    # variable -> words that, between the heading and the number, mean the
+    # match has wandered onto a neighbouring caption.  Keyed per field because
+    # the words that disqualify a *balance* ("ACL", "non-performing") are the
+    # very labels the allowance and nonaccrual fields match on.
+    disqualify: dict[str, re.Pattern[str]] = field(default_factory=dict)
+    # Banks whose slide layout this spec has actually been checked against.
+    # Empty would mean "every bank", which is what the first version did and
+    # why it had to be restricted -- see the note above :data:`PHRASE_SPECS`.
+    tickers: tuple[str, ...] = field(default=())
+    # Where the section stops.  A character window cannot know where a slide
+    # ends, and running past the end is how the office block came to be read
+    # from the multi-family slide that follows it.
+    boundary: re.Pattern[str] | None = None
 
 
-_NUMBER = r"\$?\s*(\d[\d,]*(?:\.\d+)?)"
+# A currency-marked number: "$858", "$ 7.4", "$1,832".  Requiring the "$" is
+# most of what separates a disclosed balance from a number that merely sits
+# nearby -- an axis label, a percentage, a share count -- on a slide where
+# proximity means nothing.
+# The currency marker is sometimes doubled where a template leaves an empty
+# cell before the figure -- Regions' 1Q24 office block reads "Balances $ $1,504"
+# -- so a second "$" is tolerated rather than ending the match.
+_MONEY = r"\$\s*\$?\s*(\d[\d,]*(?:\.\d+)?)"
+
+# Regions gives every property-type slide the same heading shape, so the next
+# one of these is where the office slide stops.  Without that boundary the
+# office block was read from the multi-family slide printed after it: office
+# exposure of $1,574m came out as $4,279m, which is multi-family's balance.
+# The slide *number* is what makes this a boundary rather than a description.
+# Matching on "Portfolio (Outstanding balances as of" alone would fire on the
+# office slide's own subtitle and truncate the window to nothing.
+_RF_SLIDE_BOUNDARY = re.compile(
+    r"(?<!\d)\d{1,2} CRE[\s\-]+[\w\-]+ Portfolio", re.IGNORECASE
+)
 
 OFFICE_CRE = PhraseSpec(
     name="office_cre",
@@ -303,32 +334,52 @@ OFFICE_CRE = PhraseSpec(
         r"|office (commercial real estate|real estate) portfolio",
         re.IGNORECASE,
     ),
+    # A generous cap; the slide boundary below is what actually ends the
+    # section, and it fires long before this does.
+    window=1400,
+    boundary=_RF_SLIDE_BOUNDARY,
+    # Regions prints a fixed "Key Portfolio Metrics" block under its office
+    # heading -- Balances / % of Total Loans / NPL / Charge-offs / ACL, in that
+    # order, every quarter.  No other bank in the universe does, which is the
+    # whole reason this is an allowlist; see :data:`PHRASE_SPECS`.
+    tickers=("RF",),
     fields={
+        # Anchored on the block, not on the word "Balances" alone.  The slide's
+        # own prose says "Outstanding balances as of June 30" in its subtitle,
+        # and its footnote says "except for charge-offs" -- both of which a
+        # bare label match walks straight into.
         "loans_office_cre": re.compile(
-            rf"(?:balances?|outstanding(?: balances?)?|total office)\s*(?:\(.{{0,40}}\))?\s*{_NUMBER}",
+            rf"Key Portfolio Metrics.{{0,12}}?Balances\s*{_MONEY}",
             re.IGNORECASE,
         ),
         "nonaccrual_office_cre": re.compile(
-            rf"\b(?:npl|nonaccrual|non.?performing(?: loans)?)\b\s*(?!/)\s*{_NUMBER}",
-            re.IGNORECASE,
+            rf"\bNPL\b(?! ?/)[\s:]*{_MONEY}", re.IGNORECASE
         ),
         "acl_office_cre": re.compile(
-            rf"\bacl\b\s*(?!/)\s*{_NUMBER}|allowance\s*(?:for credit losses)?\s*{_NUMBER}",
-            re.IGNORECASE,
+            rf"\bACL\b(?! ?/)[\s:]*{_MONEY}", re.IGNORECASE
         ),
         "nco_office_cre": re.compile(
-            rf"charge.?offs\s*(?!/)\s*{_NUMBER}",
-            re.IGNORECASE,
+            rf"Charge.?offs\b(?! ?/)[\s:]*{_MONEY}", re.IGNORECASE
         ),
     },
 )
 
-# Leveraged lending is mentioned in passing far more often than it is measured
-# -- in a risk-appetite bullet, in a footnote, in a list of portfolios a bank
-# has been reducing.  The value therefore has to be tied to the words
-# themselves rather than picked up from the next "total" on the slide: reading
-# the first number within a 1,400-character window of any mention put US
-# Bancorp's leveraged book at $1.18 trillion against a $381bn loan book.
+# Leveraged lending is *defined* on these slides far more often than it is
+# measured -- in a risk-appetite bullet, a footnote, a list of portfolios a
+# bank has been reducing.  Every pattern tried against it read something else:
+#
+#   USB    the next "total" on the slide            -> $1.18tn vs a $381bn book
+#   GS     "Results Snapshot Net Revenues 2025 $58.28 billion"
+#   CFG    "granular hold positions with an average outstanding of ~$12 million"
+#   FCNCA  "CIT has built risk management ... for a $100 billion" (rail)
+#   PNC    "~90% are CLO securitizations $33 billion"
+#   STT    "Average loan size of ..."
+#
+# None of those is a leveraged-lending balance, and the only reading that was
+# right -- Regions' "Leveraged Lending Definition - $6.8B" -- is a prose
+# fragment stating a definition, not a reported balance.  The spec is kept for
+# the record and left out of :data:`PHRASE_SPECS`: the column stays null rather
+# than carrying six banks' worth of unrelated numbers.
 LEVERAGED = PhraseSpec(
     name="leveraged_lending",
     section=re.compile(
@@ -346,7 +397,22 @@ LEVERAGED = PhraseSpec(
     },
 )
 
-PHRASE_SPECS: tuple[PhraseSpec, ...] = (OFFICE_CRE, LEVERAGED)
+# Phrase specs are an **allowlist**, not a general reader, and that is the
+# hard-won conclusion of this module.
+#
+# A statistical schedule has structure a parser can lean on -- a caption, row
+# labels, aligned columns.  A slide has none: the only evidence that a number
+# belongs to a heading is that it is printed near it, and "near" is worth
+# nothing when the neighbouring caption is a share count or a revenue line.
+# Run across all 31 banks, the office spec put Bank of America's *share count*
+# in the office column, Citizens' *allowance* in place of its balance, and
+# First Citizens' *venture* book in place of its offices -- four of five banks
+# wrong, every value plausible, nothing raised.
+#
+# So a spec applies only to banks whose layout has been read and checked.
+# Adding a bank means looking at its deck and confirming the block, not
+# loosening a pattern until something matches.
+PHRASE_SPECS: tuple[PhraseSpec, ...] = (OFFICE_CRE,)
 
 
 # --------------------------------------------------------------------------
@@ -1029,8 +1095,17 @@ def extract_phrases(text: str, doc: IRDoc) -> list[dict[str, Any]]:
     """
     rows: list[dict[str, Any]] = []
     for spec in PHRASE_SPECS:
+        if spec.tickers and doc.ticker not in spec.tickers:
+            continue
         for match in spec.section.finditer(text):
             window = text[match.end() : match.end() + spec.window]
+            # Stop at the next slide rather than at an arbitrary character
+            # count -- the following slide's metrics block looks exactly like
+            # this one's and is the likeliest thing to be captured by mistake.
+            if spec.boundary is not None:
+                edge = spec.boundary.search(window)
+                if edge is not None:
+                    window = window[: edge.start()]
             # A slide states its unit in its own caption ("$ in Millions"),
             # which is better evidence than anything inferable later.
             scale = declared_scale(window[:400]) or declared_scale(
@@ -1045,6 +1120,13 @@ def extract_phrases(text: str, doc: IRDoc) -> list[dict[str, Any]]:
                 if raw is None:
                     continue
                 if _PCT_SUFFIX.match(window[found.end() :]):
+                    continue
+                # Whatever stands between the heading and the number decides
+                # whether the number is still about the heading.  On a slide,
+                # a neighbouring caption is the likeliest thing to have been
+                # captured, and it names itself.
+                blocker = spec.disqualify.get(variable)
+                if blocker is not None and blocker.search(window[: found.start()]):
                     continue
                 value = _to_number(raw)
                 if value is None or value <= 0:

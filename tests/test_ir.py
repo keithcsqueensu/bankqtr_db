@@ -347,6 +347,59 @@ _OFFICE_DECK = (
 )
 
 
+def test_phrase_specs_apply_only_to_banks_whose_layout_was_checked() -> None:
+    """Run across all 31 banks, the office spec was wrong on four of five.
+
+    It read Bank of America's share count, Citizens' allowance and First
+    Citizens' venture book as office exposure -- every value plausible, nothing
+    raised.  A slide gives a parser no structure to lean on, so a spec applies
+    only where the layout has actually been read.
+    """
+    assert all(spec.tickers for spec in ir_extract.PHRASE_SPECS)
+
+    bac = ir.IRDoc(
+        bank="Bank of America",
+        ticker="BAC",
+        cik="0000070858",
+        year=2024,
+        quarter=1,
+        doc_type="presentation",
+        url="https://example.invalid/bac.htm",
+        origin="page",
+    )
+    # The text that produced $7.87bn of "office CRE" from a share count.
+    deck = (
+        "CRE Office Portfolio o1 6.1 % 6.2 % 5.8 % "
+        "Per Share Data Common shares outstanding (in billions) 7.87"
+    )
+    assert ir_extract.extract_phrases(deck, bac) == []
+
+
+def test_leveraged_lending_is_not_extracted_at_all() -> None:
+    """Every pattern tried against it read something else.
+
+    Goldman's *net revenues*, Citizens' average hold position, PNC's CLO
+    securitizations. The column stays null rather than carrying six banks'
+    worth of unrelated numbers.
+    """
+    assert ir_extract.LEVERAGED not in ir_extract.PHRASE_SPECS
+    deck = (
+        "Leveraged Lending exposure discussion. Results Snapshot "
+        "Net Revenues 2025 $58.28 billion"
+    )
+    gs = ir.IRDoc(
+        bank="Goldman Sachs",
+        ticker="GS",
+        cik="0000886982",
+        year=2025,
+        quarter=4,
+        doc_type="presentation",
+        url="https://example.invalid/gs.htm",
+        origin="edgar8k",
+    )
+    assert ir_extract.extract_phrases(deck, gs) == []
+
+
 def test_office_phrases_stop_at_the_first_section() -> None:
     rows = ir_extract.extract_phrases(_OFFICE_DECK, _doc())
     by_var = {r["variable"]: r["value"] for r in rows}
