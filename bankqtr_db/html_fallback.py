@@ -73,7 +73,9 @@ ACL_ROLLFORWARD = TableSpec(
     # ``variables``, on the other side of the pipeline.
     row_map={
         r"beginning balance|balance,? (at )?beginning": "acl_beginning",
-        r"net charge.?offs": "nco",
+        # 'net' is not always adjacent: Zions writes 'net loan and lease
+        # charge-offs', which the adjacent form leaves in the gross column.
+        r"net\b.{0,30}charge.?offs": "nco",
         r"gross charge.?offs|charge.?offs": "charge_offs",
         r"recoveries": "recoveries",
         r"provision": "provision",
@@ -160,7 +162,11 @@ NONPERFORMING = TableSpec(
 # "total loans" pattern.
 # Labels whose row must never be read at all.  Two kinds.
 #
-# The first is a different population: held-for-sale, unfunded, modified.
+# The first is a different population, or a different unit: held-for-sale,
+# unfunded, modified -- and anything stating a *ratio*, which belongs beside
+# 'percent' and '%'.  Zions prints 'Ratio of net charge-offs to average loans
+# and leases' in the same table as the dollar rollforward, and a percentage
+# read as a dollar amount is the quietest error this file can make.
 #
 # The second is a label that *negates* the concept it names, which is the same
 # trap ``taxonomy.LOAN_RULES`` guards three times over on the member side and
@@ -171,7 +177,8 @@ EXCLUDE_LABEL = re.compile(
     r"experiencing financial difficulty|troubled debt|modification"
     r"|held for sale|unfunded|commitment|guarantee|servicing"
     r"|fair value|weighted average|per share|percent|%"
-    r"|\bexcluding\b|\bexcept\b|\bnon-?criticized\b|\bpre-?provision\b",
+    r"|\bexcluding\b|\bexcept\b|\bnon-?criticized\b|\bpre-?provision\b"
+    r"|\bratio\b",
     re.IGNORECASE,
 )
 

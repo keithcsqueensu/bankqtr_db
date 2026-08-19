@@ -1301,17 +1301,50 @@ def test_a_label_that_negates_a_concept_is_not_read_as_it(label: str) -> None:
 
 
 def test_net_charge_offs_are_not_read_as_gross() -> None:
-    """Row patterns are first-match-wins and "net charge-offs" contains
-    "charge-offs", so the net rule has to be listed first or it is
-    unreachable -- the same net/gross trap as the element split."""
+    """Row patterns are first-match-wins and every net label contains the gross
+    one, so the net rule has to be listed first or it is unreachable -- the
+    same net/gross trap as the element split in ``variables``."""
     spec = next(s for s in html_fallback.SPECS if s.name == "acl_rollforward")
     keys = list(spec.row_map)
-    assert keys.index(r"net charge.?offs") < keys.index(
-        r"gross charge.?offs|charge.?offs"
-    )
+    net = next(k for k in keys if spec.row_map[k] == "nco")
+    gross = next(k for k in keys if spec.row_map[k] == "charge_offs")
+    assert keys.index(net) < keys.index(gross)
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        # A ratio is not a dollar amount, and Zions prints one in the same
+        # table as the rollforward it belongs to.
+        "ratio of net charge-offs to average loans and leases",
+        "ratio of total net charge-offs to average total loans and leases",
+    ],
+)
+def test_a_ratio_row_is_not_read_as_an_amount(label: str) -> None:
+    assert html_fallback.EXCLUDE_LABEL.search(label)
+
+
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        ("net charge-offs", "nco"),
+        ("net charge-offs (recoveries)", "nco"),
+        # "net" is not always adjacent to the noun it qualifies.
+        ("net loan and lease charge-offs", "nco"),
+        ("gross charge-offs", "charge_offs"),
+        ("charge-offs", "charge_offs"),
+    ],
+)
+def test_net_and_gross_charge_offs_land_in_their_own_columns(
+    label: str, expected: str
+) -> None:
+    import re as _re
+
+    spec = next(s for s in html_fallback.SPECS if s.name == "acl_rollforward")
+    assert not html_fallback.EXCLUDE_LABEL.search(label)
     matched = next(
         var
         for pattern, var in spec.row_map.items()
-        if __import__("re").search(pattern, "net charge-offs", __import__("re").I)
+        if _re.search(pattern, label, _re.IGNORECASE)
     )
-    assert matched == "nco"
+    assert matched == expected
