@@ -564,3 +564,48 @@ for both.
 
 `BANKQTR_WORKERS=1` restores the serial path, which is the first thing to reach
 for if a parallel build is ever suspected of disagreeing with a serial one.
+
+## 12. A disclosure table that states a rollup and its own parts
+
+Wells Fargo's `loans_total` for 2022Q3 read **$1.33 trillion** against $932bn
+the quarter before and $941bn the quarter after.
+
+No undimensioned loan fact exists for that quarter, so the total came from
+`partition_total`, which sums the members of one signature. The signature it
+chose -- the pre-2018 receivable-type table -- carries the consumer *segment*
+beside the five consumer classes underneath it:
+
+| member | |
+|---|---|
+| `ConsumerPortfolioSegmentMember` | 395.94 |
+| first lien + auto + card + other + junior lien | 254.16 + 54.55 + 43.56 + 29.77 + 13.90 = **395.94** |
+
+Summed flat that is the consumer book twice. And `prefer="coverage"` selects
+that signature *because* it is the largest, which is the preference that keeps
+Wells Fargo's complete book from being read off an incomplete shallow cut --
+so the two pull in opposite directions and coverage was winning.
+
+The category tree alone cannot say which members are rollups. Wells Fargo tags
+commercial real estate mortgage as `RealEstateLoanMember` and construction as
+its sibling, and the tree calls construction a child of `cre_total`; dropping
+every descendant of a present ancestor would delete the construction book. The
+arithmetic settles it instead -- a category is dropped only where its own value
+equals the sum of the categories beneath it that this table actually
+discloses.
+
+**The tolerance is the whole fix.** Containment is an identity taken from one
+table, so it holds to the precision the filing reports in; Wells Fargo's
+matches to the dollar. At one per cent it also matched a coincidence: Raymond
+James tags six sibling segments, and CRE, REIT and tax-exempt happen to sum to
+within 0.97% of the commercial segment, so four quarters of its loan book
+quietly lost a tenth of their value. At one *thousandth* -- still 150x the
+worst rounding across a handful of components reported in millions -- the
+identity fires and the coincidence does not.
+
+One row in 1,648 changes: Wells Fargo 2022Q3, 1.327tn to **931.3bn**, and
+`loans_to_assets` with it, from 70.7% to 49.6%.
+
+`taxonomy.OVERLAPPING` is retired in the same change. It declared this hazard
+for three parents out of six, was never read by anything, and a hand-kept
+partial copy of a hierarchy that already exists in `LOAN_CATEGORIES` is a copy
+that drifts. `taxonomy.descendants` derives it instead.

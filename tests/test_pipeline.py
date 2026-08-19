@@ -1134,3 +1134,88 @@ def test_a_rollup_is_kept_for_flows() -> None:
     out = panel.build_panel(frame(rows), derived=False)
     assert out["loans_resi_mortgage"][0] == pytest.approx(242.27)
     assert out["charge_offs_resi_mortgage"][0] == pytest.approx(0.04)
+
+
+# ---- a disclosure table that states a rollup and its own parts -----------
+
+
+def test_a_partition_drops_a_rollup_that_contains_its_parts() -> None:
+    """The Wells Fargo 2022Q3 case: 1.33tn of loans against a 931bn book.
+
+    The receivable-type table carries the consumer segment beside the five
+    consumer classes underneath it, and the five come to the segment exactly.
+    ``prefer="coverage"`` selects that signature *because* it is the largest,
+    so the flat sum is the one thing the total must not be.
+    """
+    rows = [
+        fact(
+            ticker="WFC",
+            period=dt.date(2022, 9, 30),
+            value=v,
+            loan_class=m,
+            dim_axes=CLS,
+            n_dims=1,
+        )
+        for m, v in (
+            ("ConsumerPortfolioSegmentMember", 395.94),
+            ("FirstMortgageMember", 254.16),
+            ("AutomobileLoanMember", 54.55),
+            ("CreditCardReceivablesMember", 43.56),
+            ("ConsumerLoanMember", 29.77),
+            ("SecondMortgageMember", 13.90),
+            ("CommercialLoanMember", 379.69),
+        )
+    ]
+    out = panel.build_panel(frame(rows), derived=False)
+    # 395.94 + 379.69, with the five consumer classes folded into the segment
+    # they add up to rather than counted a second time beside it.
+    assert out["loans_total"][0] == pytest.approx(775.63)
+
+
+def test_a_sibling_named_like_a_parent_is_still_summed() -> None:
+    """Wells Fargo tags CRE mortgage as RealEstateLoanMember and construction
+    as its sibling, but the category tree calls construction a child of
+    cre_total.  Dropping every descendant of a present ancestor would lose the
+    construction book; only the arithmetic may decide.
+    """
+    rows = [
+        fact(period=dt.date(2022, 9, 30), value=v, loan_class=m, dim_axes=CLS, n_dims=1)
+        for m, v in (
+            ("RealEstateLoanMember", 133.77),
+            ("ConstructionLoansMember", 21.89),
+        )
+    ]
+    out = panel.build_panel(frame(rows), derived=False)
+    assert out["loans_cre_total"][0] == pytest.approx(133.77)
+    assert out["loans_construction"][0] == pytest.approx(21.89)
+    assert out["loans_total"][0] == pytest.approx(155.66)
+
+
+def test_siblings_that_nearly_sum_to_a_fourth_are_not_a_rollup() -> None:
+    """Raymond James tags six sibling segments, not a hierarchy.
+
+    Three of them come to within 0.97% of a fourth by coincidence.  The
+    category tree calls CRE, REIT and tax-exempt descendants of commercial, so
+    a loose tolerance reads the coincidence as containment and deletes a tenth
+    of the bank's loan book.  Containment is an identity, not a near-miss.
+    """
+    rows = [
+        fact(
+            ticker="RJF",
+            period=dt.date(2023, 9, 30),
+            value=v,
+            segment=m,
+            dim_axes=SEG,
+            n_dims=1,
+        )
+        for m, v in (
+            ("SecuritiesBasedLoanMember", 14.582),
+            ("CommercialPortfolioSegmentMember", 10.135),
+            ("ResidentialPortfolioSegmentMember", 8.636),
+            ("CommercialRealEstatePortfolioSegmentMember", 7.024),
+            ("REITLoansPortfolioSegmentMember", 1.668),
+            ("TaxExemptLoanPortfolioSegmentMember", 1.541),
+        )
+    ]
+    out = panel.build_panel(frame(rows), derived=False)
+    assert out["loans_total"][0] == pytest.approx(43.586)

@@ -18,6 +18,7 @@ data-quality finding, not a no-op.
 
 from __future__ import annotations
 
+import functools
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -656,11 +657,16 @@ def rollup_children(category: str) -> list[str]:
     return [k for k, v in LOAN_CATEGORIES.items() if v == category]
 
 
-# Categories that must not be summed together because banks disclose them at
-# overlapping levels of detail (a bank reporting cre_total AND cre_investor
-# would double-count if both were added into commercial_total).
-OVERLAPPING = {
-    "cre_total": ("cre_investor", "cre_owner_occupied", "multifamily", "construction"),
-    "consumer_total": ("resi_mortgage", "home_equity", "credit_card", "auto"),
-    "commercial_total": ("cre_total", "ci", "small_business", "lease"),
-}
+# Categories that must not be summed together, because a bank disclosing both a
+# rollup and the classes beneath it would have the same balance counted twice.
+# Derived from the tree above rather than listed by hand: a second, partial
+# copy of the hierarchy is a copy that drifts, and the earlier hand-written one
+# named three parents out of six and was never read by anything.
+@functools.cache
+def descendants(category: str) -> frozenset[str]:
+    """Every category below this one in the rollup tree."""
+    direct = [k for k, parent in LOAN_CATEGORIES.items() if parent == category]
+    out: set[str] = set(direct)
+    for child in direct:
+        out |= descendants(child)
+    return frozenset(out)

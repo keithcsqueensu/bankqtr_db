@@ -402,6 +402,67 @@ def _pick_best(df: pl.DataFrame, var: VarDef, key: list[str]) -> pl.DataFrame:
     )
 
 
+# How close a rollup must sit to the sum of its own disclosed parts before it
+# is read as containing them rather than standing beside them.
+#
+# Tight on purpose.  Containment is an arithmetic identity taken from one
+# table, so it holds to the precision the filing reports in -- Wells Fargo's
+# consumer segment matches its five classes to the dollar.  A loose threshold
+# catches coincidences instead: Raymond James tags six sibling segments, and
+# three of them happen to sum to within 0.97% of a fourth, which at one per
+# cent silently deleted a tenth of its loan book.  Filings report in millions,
+# so rounding across a handful of components cannot reach a thousandth.
+ROLLUP_TOLERANCE = 0.001
+
+
+def _sum_partition(
+    df: pl.DataFrame, key: list[str], out_name: str
+) -> pl.DataFrame:
+    """Sum one signature's members, dropping any rollup that contains others.
+
+    A signature is one disclosure table, and its members usually partition the
+    balance -- but not always at one level.  Wells Fargo's 2022Q3 receivable-
+    type table carries the consumer *segment* beside the five consumer classes
+    underneath it, and the five come to 395.94bn, which is the segment to the
+    dollar.  Summed flat that is 1.33tn of loans against a 931bn book, and
+    ``prefer="coverage"`` actively selects such a signature because it is the
+    largest.
+
+    Which of the two a member is cannot be read off the category tree alone:
+    Wells Fargo tags commercial real estate mortgage as ``RealEstateLoanMember``
+    and construction as its sibling, and the tree calls construction a child of
+    cre_total, so dropping every descendant of a present ancestor would lose
+    the construction book.  The arithmetic settles it instead -- a category is
+    dropped only where its own value equals the sum of the categories beneath
+    it that this table actually discloses.
+    """
+    member_cols = [c for c in MEMBER_COLS if c in df.columns]
+    per_cat = (
+        df.sort(["filed"], descending=True, nulls_last=True)
+        .unique(subset=[*key, *member_cols], keep="first", maintain_order=True)
+        .unique(subset=[*key, "value"], keep="first", maintain_order=True)
+        .group_by([*key, "loan_cat"])
+        .agg(pl.col("value").sum())
+    )
+    wide = per_cat.pivot(on="loan_cat", index=key, values="value")
+    cats = [c for c in wide.columns if c not in key]
+
+    terms: list[pl.Expr] = []
+    for cat in cats:
+        below = [d for d in taxonomy.descendants(cat) if d in cats]
+        value = pl.col(cat).fill_null(0.0)
+        if not below:
+            terms.append(value)
+            continue
+        parts = pl.sum_horizontal([pl.col(d).fill_null(0.0) for d in below])
+        contains = (parts.abs() > 0) & (
+            (value - parts).abs() <= value.abs() * ROLLUP_TOLERANCE
+        )
+        terms.append(pl.when(contains).then(0.0).otherwise(value))
+
+    return wide.select([*key, pl.sum_horizontal(terms).alias(out_name)])
+
+
 def partition_total(
     df: pl.DataFrame, var: VarDef, *, key: list[str], out_name: str
 ) -> pl.DataFrame:
@@ -410,8 +471,8 @@ def partition_total(
     Not every bank tags a consolidated, undimensioned figure -- Wells Fargo
     reports loans only as a breakdown -- so the total has to be rebuilt from
     the parts.  Within a single signature the members are the rows of one
-    disclosure table and therefore partition the balance, which is what makes
-    the sum meaningful; across signatures it would not be.
+    disclosure table; :func:`_sum_partition` handles the case where that table
+    states a rollup and its own components together.
     """
     base = df.filter(
         pl.col("tag").is_in(list(var.tags))
@@ -424,7 +485,7 @@ def partition_total(
     chosen = _restrict_to_best_signature(
         _tag_priority(base, var.tags), key, prefer="coverage"
     )
-    return _sum_members(chosen, key, out_name)
+    return _sum_partition(chosen, key, out_name)
 
 
 def _with_partition_fallback(
