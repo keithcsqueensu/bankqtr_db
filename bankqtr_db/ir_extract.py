@@ -79,6 +79,7 @@ from typing import Any
 import pandas as pd
 import polars as pl
 
+from . import parallel
 from .html_fallback import EXCLUDE_LABEL, _to_number
 from .ir import IRDoc
 
@@ -1430,16 +1431,28 @@ def _consolidated_first(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _extract_pair(pair: tuple[IRDoc, Path]) -> pl.DataFrame:
+    """Pool entry point: module-level so it survives being pickled to a worker."""
+    return extract_document(*pair)
+
+
 def extract_documents(pairs: list[tuple[IRDoc, Path]]) -> pl.DataFrame:
-    frames = []
-    for doc, path in pairs:
-        try:
-            df = extract_document(doc, path)
-        except Exception as exc:  # noqa: BLE001 - one bad PDF must not stop the run
-            log.warning("IR extract failed %s %s: %s", doc.ticker, path.name, exc)
-            continue
-        if not df.is_empty():
-            frames.append(df)
+    """Parse the cached investor documents across cores.
+
+    Nothing here touches the network -- ``fetch_ir.py`` has already put every
+    document on disk -- so this stage parallelises without any of the rate
+    limiting the filing paths need.
+    """
+    frames = [
+        parallel.map_frames(
+            _extract_pair,
+            pairs,
+            schema=IR_SCHEMA,
+            label="IR extract",
+            describe=lambda pair: f"{pair[0].ticker} {pair[1].name}",
+        )
+    ]
+    frames = [f for f in frames if not f.is_empty()]
     if not frames:
         return pl.DataFrame(schema=IR_SCHEMA)
 

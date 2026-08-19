@@ -3,6 +3,13 @@
 uv run python scripts/build_panel.py --since 2020-01-01
 uv run python scripts/build_panel.py --since 2020-01-01 --html-fallback
 uv run python scripts/build_panel.py --since 2020-01-01 --html-fallback --ir
+
+The panel reaches back to 2013.  The HTML and IR fallbacks do not: both were
+written and verified against post-2020 layouts, so hold them at 2020 even when
+the XBRL window is wider.
+
+uv run python scripts/build_panel.py --since 2013-01-01 --html-fallback
+    --html-since 2020-01-01 --ir
 """
 
 from __future__ import annotations
@@ -93,6 +100,9 @@ def build_info(
             "comparators": bool(args.comparators),
             "html_fallback": bool(args.html_fallback),
             "html_forms": args.html_forms if args.html_fallback else None,
+            "html_since": (args.html_since or args.since)
+            if args.html_fallback
+            else None,
             "ir": bool(args.ir),
             "ir_doc_types": args.ir_doc_types if args.ir else None,
         },
@@ -136,6 +146,17 @@ def main() -> int:
     )
     ap.add_argument(
         "--html-forms", default="10-K", help="forms to run the HTML fallback over"
+    )
+    ap.add_argument(
+        "--html-since",
+        default="",
+        help=(
+            "start date for the HTML fallback only (defaults to --since). "
+            "The row-label patterns in html_fallback were verified against "
+            "post-2020 filing layouts, and the one column the fallback is "
+            "allowed to create -- office CRE -- is a post-2020 disclosure, so "
+            "a panel starting in 2013 should still parse HTML from 2020."
+        ),
     )
     ap.add_argument(
         "--all-tags",
@@ -206,9 +227,12 @@ def main() -> int:
     html = None
     if args.html_fallback:
         forms = tuple(f.strip() for f in args.html_forms.split(","))
+        html_since = (
+            dt.date.fromisoformat(args.html_since) if args.html_since else since
+        )
         targets = []
         for bank in banks:
-            targets.extend(filings.list_filings(bank, since=since, forms=forms))
+            targets.extend(filings.list_filings(bank, since=html_since, forms=forms))
         print(f"html fallback over {len(targets)} filings...", flush=True)
         html = html_fallback.extract_filings(targets)
         print(f"  parsed {html.height} rows", flush=True)

@@ -70,6 +70,20 @@ def _find_instance_name(filing: Filing) -> str | None:
     return plain[0] if plain else None
 
 
+def ensure_cached(filing: Filing) -> bool:
+    """Put a filing's instance on disk if it is not already there.
+
+    Callers that go on to parse in a worker pool use this first, serially: the
+    rate limiter in :mod:`edgar` spaces requests within one process, so letting
+    workers fetch would multiply the request rate by the worker count.  It
+    reads nothing when the document is already cached, which is what keeps a
+    warm rebuild cheap.
+    """
+    if _instance_cache_path(filing).exists():
+        return True
+    return fetch_instance(filing) is not None
+
+
 def fetch_instance(filing: Filing, *, refresh: bool = False) -> bytes | None:
     """Return raw instance XML for a filing, caching it gzipped on disk."""
     path = _instance_cache_path(filing)
@@ -244,14 +258,32 @@ _SCHEMA = {
 }
 
 # Axes lifted into their own columns because the panel keys on them.
+#
+# The axis names changed in the 2018 taxonomy.  A pre-2018 filing spells the
+# same cut differently, and an unaliased axis lands in ``other_dims``, which
+# leaves the mix, risk-rating and delinquency columns null for exactly the
+# banks and years that matter -- Wells Fargo's FY2013 instance carries no
+# class-of-financing-receivable axis at all, so without
+# ``AccountsNotesLoansAndFinancingReceivableByReceivableTypeAxis`` its entire
+# loan breakdown is invisible.  Every legacy name below was read off a FY2013
+# 10-K instance rather than from the taxonomy documentation; the bank and fact
+# count in each comment is what that sweep measured.
+#
+# Order inside a tuple decides which axis wins when one fact carries several,
+# so legacy names go after the modern ones except where the legacy axis is the
+# more specific cut (receivable-type beats the catch-all FinancialInstrument).
 PROMOTED_AXES = {
     "segment": (
         "FinancingReceivablePortfolioSegmentAxis",
         "ProductOrServiceAxis",
+        "PortfolioSegmentAxis",  # JPM, FITB
+        "FinancingReceivableInformationByPortfolioSegmentAxis",  # KEY
     ),
     "loan_class": (
         "FinancingReceivableRecordedInvestmentByClassOfFinancingReceivableAxis",
         "ClassOfFinancingReceivableAxis",
+        # 13 banks, 4,500 facts in FY2013 -- and the only loan axis WFC has.
+        "AccountsNotesLoansAndFinancingReceivableByReceivableTypeAxis",
         "FinancialInstrumentAxis",
     ),
     "credit_quality": (
@@ -259,8 +291,16 @@ PROMOTED_AXES = {
         "FinancingReceivableCreditQualityIndicatorAxis",
         "CreditRatingMoodysAxis",
         "CreditScoreFicoAxis",
+        "CreditQualityIndicatorAxis",  # RF, HBAN
+        "FinancingReceivableInformationByCreditQualityIndicatorAxis",  # KEY
+        "FinancingReceivableRecordedInvestmentByCreditQualityIndicatorAxis",  # TFC
     ),
-    "past_due": ("FinancingReceivablesPeriodPastDueAxis",),
+    "past_due": (
+        "FinancingReceivablesPeriodPastDueAxis",
+        "FinancingReceivableByDelinquencyStatusAxis",  # JPM
+        "FinancingReceivableInformationByDelinquencyStatusAxis",  # NTRS
+        "AgingAnalysisOfLoansAndLeasesAxis",  # HBAN
+    ),
     "consolidation": ("ConsolidationItemsAxis", "StatementBusinessSegmentsAxis"),
 }
 

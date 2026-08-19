@@ -19,17 +19,20 @@ step can prefer XBRL and show what the fallback actually matched.
 
 from __future__ import annotations
 
+import gzip
 import logging
 import re
 import warnings
 from dataclasses import dataclass
 from io import BytesIO, StringIO
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import polars as pl
 
-from . import edgar, taxonomy
+from . import edgar, parallel, taxonomy
+from .config import RAW_HTML
 from .filings import Filing
 
 log = logging.getLogger(__name__)
@@ -221,8 +224,44 @@ SPECS: tuple[TableSpec, ...] = (
 # --------------------------------------------------------------------------
 
 
+def _html_cache_path(filing: Filing) -> Path:
+    return RAW_HTML / f"{filing.ticker}_{filing.accn_nodash}.html.gz"
+
+
+def ensure_cached(filing: Filing) -> bool:
+    """Put a filing's primary document on disk if it is not already there.
+
+    Same contract as ``instance.ensure_cached`` and for the same two reasons:
+    it keeps fetching serial and behind the one rate limiter while parsing runs
+    in a pool, and it makes a rebuild cost nothing.  Re-parsing 210 filings was
+    dominated by re-downloading them, because this cache was declared in
+    ``config.RAW_HTML`` and never written.
+    """
+    path = _html_cache_path(filing)
+    if path.exists():
+        return True
+    content = _download_primary_document(filing)
+    if content is None:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    with gzip.open(tmp, "wb") as fh:
+        fh.write(content)
+    tmp.replace(path)
+    return True
+
+
 def fetch_primary_document(filing: Filing) -> bytes | None:
-    """Primary 10-K/10-Q HTML as **bytes**, resolved via the index when needed.
+    """Primary 10-K/10-Q HTML as **bytes**, from cache where one exists."""
+    path = _html_cache_path(filing)
+    if path.exists():
+        with gzip.open(path, "rb") as fh:
+            return fh.read()
+    return _download_primary_document(filing)
+
+
+def _download_primary_document(filing: Filing) -> bytes | None:
+    """Fetch the primary document, resolving it via the index when needed.
 
     Bytes rather than text on purpose: inline-XBRL filings begin with an XML
     declaration, and lxml refuses to parse a ``str`` that carries an encoding
@@ -417,18 +456,15 @@ def extract_filing(filing: Filing) -> pl.DataFrame:
 
 
 def extract_filings(filing_list: list[Filing]) -> pl.DataFrame:
-    frames = []
-    for f in filing_list:
-        try:
-            df = extract_filing(f)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("html extract failed %s %s: %s", f.ticker, f.accn, exc)
-            continue
-        if not df.is_empty():
-            frames.append(df)
-    if not frames:
-        return pl.DataFrame(schema=HTML_SCHEMA)
-    return pl.concat(frames, how="vertical_relaxed")
+    """Parse many filings, downloading serially and parsing across cores."""
+    cached = [f for f in filing_list if ensure_cached(f)]
+    return parallel.map_frames(
+        extract_filing,
+        cached,
+        schema=HTML_SCHEMA,
+        label="html extract",
+        describe=lambda f: f"{f.ticker} {f.accn}",
+    )
 
 
 def canonical_loan_columns() -> set[str]:

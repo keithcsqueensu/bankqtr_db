@@ -42,10 +42,21 @@ class VarDef:
 # Balance-sheet stocks
 # --------------------------------------------------------------------------
 
+# Legacy (pre-CECL) element names are **appended**, never prepended.  Ranking
+# inside ``panel._restrict_to_best_signature`` is by position in these tuples,
+# so a name added at the end cannot displace a modern one in a quarter where
+# both exist; the 2013-2019 quarters, which carry only the legacy name, fall
+# through to it.  Prepending would rewrite the 2020-2026 panel.
+
 LOAN_TAGS = (
     "FinancingReceivableExcludingAccruedInterestBeforeAllowanceForCreditLoss",
     "LoansAndLeasesReceivableNetReportedAmount",
     "NotesReceivableGross",
+    # --- pre-CECL ------------------------------------------------------
+    # The dominant loan element on the class and segment axes in every
+    # FY2013 instance opened (16 of 29 banks, 1,422 dimensional facts).
+    "LoansAndLeasesReceivableNetOfDeferredIncome",
+    "LoansAndLeasesReceivableGrossCarryingAmount",
 )
 
 ACL_TAGS = (
@@ -53,6 +64,9 @@ ACL_TAGS = (
     "FinancingReceivableAllowanceForCreditLoss",
     "FinancingReceivableAllowanceForCreditLossExcludingAccruedInterest",
     "AllowanceForLoanAndLeaseLossesRealEstate",
+    # --- pre-CECL ------------------------------------------------------
+    # M&T's only allowance element in 2013; 20 of 29 banks tag it.
+    "LoansAndLeasesReceivableAllowance",
 )
 
 NONACCRUAL_TAGS = (
@@ -60,7 +74,58 @@ NONACCRUAL_TAGS = (
     "FinancingReceivableRecordedInvestmentNonaccrualStatus",
     "FinancingReceivableNonaccrualNoAllowance",
     "FinancingReceivableExcludingAccruedInterestNonaccrualNoAllowance",
+    # --- pre-CECL ------------------------------------------------------
+    "LoansAndLeasesReceivableImpairedNonperformingNonaccrualOfInterest",
 )
+
+# --------------------------------------------------------------------------
+# Legacy delinquency: element-shaped, not axis-shaped
+# --------------------------------------------------------------------------
+
+# A pre-2018 filing does not put delinquency on an axis.  It uses a separate
+# *element* per bucket and dimensions that element by loan class, so the
+# bucket is carried by the tag rather than by a member.  ``xbrl`` reads
+# ``pd_cat`` off the tag for these, and ``panel`` builds the delinquency
+# columns from them with one tag chosen per bucket -- the axis-based builder's
+# one-tag-per-bank-quarter rule would keep a single bucket and drop the rest.
+#
+# Values inside a bucket are priority-ordered.  For 90+, the "equal to or
+# greater than 90 days" element is preferred over "90 days past due and still
+# accruing" because it means the same thing as the modern
+# ``FinancialAssetEqualToOrGreaterThan90DaysPastDueMember`` -- all 90+
+# exposure, accruing or not -- which is what keeps the column comparable
+# across the CECL boundary.
+LEGACY_PAST_DUE_TAGS: dict[str, tuple[str, ...]] = {
+    "current": (
+        "FinancingReceivableRecordedInvestmentCurrent",
+        "FinancingReceivableRecordedInvestmentCurrentAnd1To29DaysPastDue",
+        "FinancingReceivableRecordedInvestmentCurrentAndOneToTwentyNineDaysPastDue",
+    ),
+    "dpd_30_59": ("FinancingReceivableRecordedInvestment30To59DaysPastDue",),
+    "dpd_60_89": ("FinancingReceivableRecordedInvestment60To89DaysPastDue",),
+    "dpd_30_89": (
+        "FinancingReceivableRecordedInvestment30To89DaysPastDue",
+        "FinancingReceivableRecordedInvestment30To89DaysPastDueAndStillAccruing",
+        "FinancingReceivableRecordedInvestmentThirtyToEightyNineDaysPastDue",
+        "FinancingReceivablesRecordedInvestmentThirtyToEightyNineDaysPastDue",
+        "LoansAndLeasesReceivableThirtyToEightyNineDaysPastDue",
+    ),
+    "dpd_90_plus": (
+        "FinancingReceivableRecordedInvestmentEqualToGreaterThan90DaysPastDue",
+        "FinancingReceivableRecordedInvestment90DaysPastDueAndStillAccruing",
+        "FinancingReceivablesRecordedInvestmentEqualToOrGreaterThanNinetyDaysPastDue",
+    ),
+    "past_due_total": (
+        "FinancingReceivableRecordedInvestmentPastDue",
+        "FinancingReceivableRecordedInvestmentPastDueExcluding1To29DaysPastDue",
+    ),
+}
+
+# Flat tag -> bucket lookup, and the priority order the panel ranks by.
+LEGACY_PAST_DUE_BY_TAG: dict[str, str] = {
+    tag: bucket for bucket, tags in LEGACY_PAST_DUE_TAGS.items() for tag in tags
+}
+LEGACY_PAST_DUE_ORDER: tuple[str, ...] = tuple(LEGACY_PAST_DUE_BY_TAG)
 
 STOCKS: tuple[VarDef, ...] = (
     VarDef(
@@ -159,6 +224,12 @@ FLOWS: tuple[VarDef, ...] = (
         (
             "FinancingReceivableExcludingAccruedInterestAllowanceForCreditLossWriteoffAfterRecovery",
             "FinancingReceivableAllowanceForCreditLossWriteoffAfterRecovery",
+            # --- pre-CECL, and **net** of recoveries -----------------------
+            # The one assignment in this module that fails silently: putting a
+            # net element in ``charge_offs`` leaves ``nco_rate`` understated by
+            # the recovery rate with nothing raising.
+            "AllowanceForLoanAndLeaseLossesWriteoffsNet",
+            "FinancingReceivableAllowanceForCreditLossesNetChargeOffs",
         ),
         axis="loan",
         derive=("subtract", "charge_offs", "recoveries"),
@@ -171,6 +242,11 @@ FLOWS: tuple[VarDef, ...] = (
         (
             "FinancingReceivableExcludingAccruedInterestAllowanceForCreditLossWriteoff",
             "FinancingReceivableAllowanceForCreditLossWriteoff",
+            # --- pre-CECL, and **gross** ----------------------------------
+            # Note the casing: ``WriteOffs`` here is gross, ``WriteoffsNet``
+            # above is net.  They differ by one capital letter.
+            "FinancingReceivableAllowanceForCreditLossesWriteOffs",
+            "AllowanceForLoanAndLeaseLossesWriteOffs",
         ),
         axis="loan",
         description="Gross charge-offs",
@@ -184,6 +260,10 @@ FLOWS: tuple[VarDef, ...] = (
             "FinancingReceivableAllowanceForCreditLossesRecovery",
             "FinancingReceivableAllowanceForCreditLossesRecoveries",
             "AllowanceForLoanAndLeaseLossesRecoveriesOfBadDebts",
+            # --- pre-CECL -------------------------------------------------
+            # Singular "Loss ... Recovery", not the plural spelling above; 9 of
+            # 29 banks use it in FY2013 and none of them use the plural.
+            "AllowanceForLoanAndLeaseLossRecoveryOfBadDebts",
         ),
         axis="loan",
         description="Recoveries",

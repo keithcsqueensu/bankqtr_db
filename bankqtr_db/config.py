@@ -154,6 +154,32 @@ COMPARATORS: tuple[Bank, ...] = (
 # suppressing false "coverage gap" alarms in the reconciliation report.
 THIN_LOAN_BOOK = ("custody", "broker")
 
+# --------------------------------------------------------------------------
+# Accounting regime
+# --------------------------------------------------------------------------
+
+# The incurred-loss -> CECL transition changes what ``acl``, ``provision``,
+# ``reserve_coverage`` and ``reserve_to_nonaccrual`` *mean*, and the move from
+# recorded investment to amortised cost shifts loan and nonaccrual levels
+# slightly.  Splicing the two regimes into one column without saying so
+# produces a discontinuity that reads as a credit event, so the panel carries
+# a ``basis`` column keyed on these dates instead.
+#
+# This is the standard effective date for large SEC filers -- the first fiscal
+# year beginning after 15 December 2019 -- not a per-filer confirmation from
+# each 10-K.  It is right for every filer in this universe except Raymond
+# James, whose September fiscal year puts its first CECL quarter at 2020Q4.
+CECL_ADOPTION_DEFAULT = dt.date(2020, 1, 1)
+CECL_ADOPTION: dict[str, dt.date] = {
+    "RJF": dt.date(2020, 10, 1),
+}
+
+
+def cecl_adoption(ticker: str) -> dt.date:
+    """First period end reported under CECL for a filer."""
+    return CECL_ADOPTION.get(ticker, CECL_ADOPTION_DEFAULT)
+
+
 BY_CIK = {b.cik: b for b in BANKS + COMPARATORS}
 BY_TICKER = {b.ticker: b for b in BANKS + COMPARATORS}
 BY_NAME = {b.name: b for b in BANKS + COMPARATORS}

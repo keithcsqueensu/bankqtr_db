@@ -28,6 +28,7 @@ import logging
 import polars as pl
 
 from . import taxonomy, variables
+from .config import cecl_adoption
 from .variables import ALL_VARS, RATIOS, VarDef
 
 log = logging.getLogger(__name__)
@@ -177,12 +178,46 @@ def _n_axes(col: str = "dim_axes") -> pl.Expr:
 
 # Axes that turn a balance into a *sub-slice* of itself.  A plain loan balance
 # should never be read off the delinquency or risk-rating table.
+# Matched as substrings of the signature, so a short entry covers the longer
+# spellings: "CreditQualityIndicatorAxis" also catches the FinancingReceivable-
+# and FinancingReceivableRecordedInvestmentBy- prefixed variants.
 SUBSLICE_AXES = (
     "FinancingReceivablesPeriodPastDueAxis",
     "InternalCreditAssessmentAxis",
-    "FinancingReceivableCreditQualityIndicatorAxis",
+    "CreditQualityIndicatorAxis",
     "CreditScoreFicoAxis",
+    # --- pre-2018 spellings of the same two tables -----------------------
+    "DelinquencyStatusAxis",
+    "AgingAnalysisOfLoansAndLeasesAxis",
 )
+
+
+# Their pre-2018 aliases (see ``instance.PROMOTED_AXES``) are a *fallback*, in
+# exactly the sense the legacy tag names are: used where a filing carries
+# nothing else, never in preference to a cut the modern taxonomy also
+# describes.
+#
+# Without this, a 2021 filing that still carries the old receivable-type axis
+# alongside the current class axis gets read off the old one, and the old one
+# is often not a partition -- Wells Fargo tags residential mortgage there as
+# the parent *and* its first-lien child, so summing the members counts the
+# first lien twice and puts residential at 57% of a book where it is 29%.
+MODERN_LOAN_AXES = taxonomy.MODERN_LOAN_AXES
+
+
+def _is_legacy_signature() -> pl.Expr:
+    """1 when a signature names no modern loan axis at all."""
+    return (
+        (
+            pl.col("dim_axes")
+            .str.split("|")
+            .list.set_intersection(list(MODERN_LOAN_AXES))
+            .list.len()
+            == 0
+        )
+        .cast(pl.Int32)
+        .alias("_legacy")
+    )
 
 
 def _restrict_to_best_signature(
@@ -191,6 +226,7 @@ def _restrict_to_best_signature(
     *,
     allow_subslice: bool = False,
     prefer: str = "parsimony",
+    prefer_modern_axes: bool = True,
 ) -> pl.DataFrame:
     """Keep one tag and one dimension signature per key.
 
@@ -200,8 +236,9 @@ def _restrict_to_best_signature(
 
     Candidate signatures are ranked by, in order: tag preference; whether the
     signature slices the balance by delinquency or risk rating (a plain
-    balance should not be read off those tables); how many axes it carries;
-    and finally the magnitude of what it covers.  That last term matters --
+    balance should not be read off those tables); whether it is built purely
+    from pre-2018 alias axes; how many axes it carries; and finally the
+    magnitude of what it covers.  That last term matters --
     banks publish narrow supplementary tables (fair-value-option loans,
     purchased credit-deteriorated, a single geography) on the same axes as the
     main portfolio table, and an alphabetical tie-break lands on them roughly
@@ -218,6 +255,7 @@ def _restrict_to_best_signature(
         pl.lit(0).alias("_sub")
         if allow_subslice
         else subslice.cast(pl.Int32).alias("_sub"),
+        _is_legacy_signature() if prefer_modern_axes else pl.lit(0).alias("_legacy"),
     )
     coverage = ranked.group_by([*key, "tag", "dim_axes"]).agg(
         pl.col("value").abs().sum().alias("_cover")
@@ -228,14 +266,14 @@ def _restrict_to_best_signature(
     # appears one level deeper at segment x class ($909bn), so preferring
     # parsimony understates its loan book by two-thirds.
     order = (
-        ["_tag_rank", "_sub", "_cover", "_n_axes", "dim_axes"]
+        ["_tag_rank", "_sub", "_legacy", "_cover", "_n_axes", "dim_axes"]
         if prefer == "coverage"
-        else ["_tag_rank", "_sub", "_n_axes", "_cover", "dim_axes"]
+        else ["_tag_rank", "_sub", "_legacy", "_n_axes", "_cover", "dim_axes"]
     )
     desc = (
-        [False, False, True, False, False]
+        [False, False, False, True, False, False]
         if prefer == "coverage"
-        else [False, False, False, True, False]
+        else [False, False, False, False, True, False]
     )
     # sort_by inside the aggregation rather than a preceding .sort(): a
     # group_by does not carry the frame's row order into first(), so ranking
@@ -257,7 +295,7 @@ def _restrict_to_best_signature(
             (pl.col("tag") == pl.col("_best_tag"))
             & (pl.col("dim_axes") == pl.col("_best_sig"))
         )
-        .drop("_best_tag", "_best_sig", "_n_axes", "_sub")
+        .drop("_best_tag", "_best_sig", "_n_axes", "_sub", "_legacy")
     )
 
 
@@ -304,10 +342,58 @@ def select_slice(
     return _sum_members(chosen, key, out_name)
 
 
+# How far below the largest reading of the same concept a candidate may sit
+# before it is treated as a fragment rather than an alternative measure.
+# Deliberately an order of magnitude: two genuine alternatives -- allowance on
+# loans versus allowance including unfunded commitments, loans held for
+# investment versus including held-for-sale -- differ by a few per cent.
+FRAGMENT_RATIO = 10.0
+
+
+def _drop_fragments(df: pl.DataFrame, key: list[str]) -> pl.DataFrame:
+    """Discard undimensioned candidates that are a rounding error beside another.
+
+    Tag priority assumes every candidate element measures the same concept, so
+    the modern name wins and a legacy name is reached only where nothing else
+    is there.  That assumption breaks where a filer used a modern-*named*
+    element for something far narrower.  Citigroup's FY2013 instance tags
+    ``FinancingReceivableAllowanceForCreditLosses`` -- first in ``ACL_TAGS`` --
+    at $113m, while its actual $19.6bn allowance sits undimensioned on
+    ``LoansAndLeasesReceivableAllowance``, last in the tuple.  Priority alone
+    picks the $113m and reports a 0.02% reserve ratio for Citigroup.
+
+    Reordering the tuple is not the fix -- that would rewrite the modern
+    window -- and neither is rebuilding the total from its parts, which at
+    Citigroup double-counts to $39bn.  The bank reported the right number; it
+    is simply not the highest-ranked tag.  So the smallest candidates are
+    dropped before ranking, and the choice among what remains is unchanged.
+    """
+    if df.height < 2:
+        return df
+    biggest = pl.col("value").abs().max().over(key)
+    return df.filter(
+        (biggest <= 0) | (pl.col("value").abs() * FRAGMENT_RATIO >= biggest)
+    )
+
+
 def _pick_best(df: pl.DataFrame, var: VarDef, key: list[str]) -> pl.DataFrame:
-    """One row per key: best tag, then most recently filed."""
+    """One row per key: best tag, then most recently filed.
+
+    Loan-sliced *stocks* have several tag spellings that are all meant to be
+    the same balance, so a candidate orders of magnitude below its peers is a
+    mis-tagged fragment.  Nothing else has that property, and the guard is
+    limited accordingly:
+
+    * ``unfunded_commitments`` ranks a small reserve element above a large
+      notional one on purpose, so magnitude must not decide there.
+    * a *flow* is legitimately small, zero, or negative in a given quarter --
+      Raymond James reports a nil provision beside a $10m release -- so its
+      magnitude says nothing about which tag is the right one.
+    """
     if df.is_empty():
         return df
+    if var.kind == "stock" and var.axis == "loan":
+        df = _drop_fragments(df, key)
     return (
         _tag_priority(df, var.tags)
         .sort(["_tag_rank", "filed"], descending=[False, True], nulls_last=True)
@@ -495,7 +581,10 @@ def _credit_quality_columns(facts: pl.DataFrame) -> pl.DataFrame:
     # One signature for the whole rating table, so the buckets stay mutually
     # exclusive and comparable to each other.
     cq = _restrict_to_best_signature(
-        _tag_priority(cq, variables.LOAN_TAGS), PANEL_KEY, allow_subslice=True
+        _tag_priority(cq, variables.LOAN_TAGS),
+        PANEL_KEY,
+        allow_subslice=True,
+        prefer_modern_axes=False,
     )
 
     member_cols = [c for c in MEMBER_COLS if c in cq.columns]
@@ -555,7 +644,10 @@ def _past_due_columns(facts: pl.DataFrame) -> pl.DataFrame:
         return pl.DataFrame(schema={k: pl.String for k in PANEL_KEY})
 
     pd_facts = _restrict_to_best_signature(
-        _tag_priority(pd_facts, variables.LOAN_TAGS), PANEL_KEY, allow_subslice=True
+        _tag_priority(pd_facts, variables.LOAN_TAGS),
+        PANEL_KEY,
+        allow_subslice=True,
+        prefer_modern_axes=False,
     )
     member_cols = [c for c in MEMBER_COLS if c in pd_facts.columns]
     agg = (
@@ -568,10 +660,96 @@ def _past_due_columns(facts: pl.DataFrame) -> pl.DataFrame:
     return agg.rename({c: f"pd_{c}" for c in agg.columns if c not in PANEL_KEY})
 
 
+def _legacy_past_due_columns(facts: pl.DataFrame) -> pl.DataFrame:
+    """Delinquency columns for filings that carry no delinquency axis.
+
+    Before 2018 a bank tags one *element* per bucket and dimensions that
+    element by loan class, so the bucket lives in the tag rather than in a
+    member.  :func:`_past_due_columns` cannot read this shape: it fixes one
+    tag per bank-quarter to keep the axis members mutually exclusive, which is
+    right when the buckets are members and fatal when each bucket *is* a
+    different tag -- all but one would be dropped.
+
+    Here the tag is chosen per *bucket* instead.  Within a bucket the
+    candidates are alternatives rather than components (a bank tags 90+ as
+    either "equal to or greater than 90 days" or "90 days and still
+    accruing", and both would be the same exposure counted twice), so the
+    priority order in :data:`variables.LEGACY_PAST_DUE_TAGS` still picks one.
+    Across buckets nothing is shared, so every bucket survives.
+    """
+    tags = variables.LEGACY_PAST_DUE_ORDER
+    pd_facts = add_period_labels(
+        facts.filter(
+            pl.col("instant")
+            & pl.col("tag").is_in(list(tags))
+            & pl.col("pd_cat").is_not_null()
+            & pl.col("scope").is_null()
+            & (pl.col("unit") == "USD")
+        )
+    )
+    if pd_facts.is_empty():
+        return pl.DataFrame(schema={k: pl.String for k in PANEL_KEY})
+
+    key = [*PANEL_KEY, "pd_cat"]
+    chosen = _restrict_to_best_signature(
+        _tag_priority(pd_facts, tags),
+        key,
+        allow_subslice=True,
+        prefer_modern_axes=False,
+    )
+    agg = _sum_members(chosen, key, "value").pivot(
+        on="pd_cat", index=PANEL_KEY, values="value"
+    )
+    return agg.rename({c: f"pd_{c}" for c in agg.columns if c not in PANEL_KEY})
+
+
 def _merge(left: pl.DataFrame | None, right: pl.DataFrame) -> pl.DataFrame:
     if left is None:
         return right
     return left.join(right, on=PANEL_KEY, how="full", coalesce=True)
+
+
+def _fill_nulls_from(left: pl.DataFrame, right: pl.DataFrame) -> pl.DataFrame:
+    """Outer-join ``right`` into ``left``, writing only where ``left`` is null."""
+    incoming = [c for c in right.columns if c not in PANEL_KEY]
+    if not incoming:
+        return left
+    suffixed = right.rename({c: f"{c}__legacy" for c in incoming})
+    out = left.join(suffixed, on=PANEL_KEY, how="full", coalesce=True)
+    for col in incoming:
+        if col in left.columns:
+            out = out.with_columns(
+                pl.col(col).fill_null(pl.col(f"{col}__legacy")).alias(col)
+            )
+        else:
+            out = out.with_columns(pl.col(f"{col}__legacy").alias(col))
+    return out.drop([f"{c}__legacy" for c in incoming])
+
+
+def add_basis(df: pl.DataFrame) -> pl.DataFrame:
+    """Label each bank-quarter with the accounting regime it was reported under.
+
+    Incurred loss and CECL are not the same measurement.  ``acl`` under CECL is
+    a lifetime expected-loss estimate; before 2020Q1 it is an incurred-loss
+    reserve, and the level step between them shows up in ``reserve_coverage``
+    and ``reserve_to_nonaccrual`` as a jump that looks like a credit event.
+    The panel splices the two anyway -- a single series is what a user wants --
+    but says which regime every row came from so the break can be seen,
+    filtered on, or controlled for.
+    """
+    if df.is_empty() or "ticker" not in df.columns:
+        return df
+    adopted = pl.Series(
+        "_adopted",
+        [cecl_adoption(t) for t in df["ticker"].to_list()],
+        dtype=pl.Date,
+    )
+    return df.with_columns(
+        pl.when(pl.col("period") >= adopted)
+        .then(pl.lit("cecl"))
+        .otherwise(pl.lit("incurred"))
+        .alias("basis")
+    )
 
 
 # --------------------------------------------------------------------------
@@ -721,12 +899,22 @@ def build_panel(
         _past_due_columns(facts),
     ]
     parts = [p for p in parts if not p.is_empty() and p.height > 0]
-    if not parts:
-        return pl.DataFrame()
 
-    panel = parts[0]
-    for part in parts[1:]:
-        panel = panel.join(part, on=PANEL_KEY, how="full", coalesce=True)
+    # The legacy delinquency elements go in behind the axis path, in the same
+    # spirit as the HTML and IR fallbacks: only cells the axis path left null
+    # are written, so a quarter that has both shapes keeps the axis reading.
+    legacy_pd = _legacy_past_due_columns(facts)
+    has_legacy = not legacy_pd.is_empty() and legacy_pd.height > 0
+    if not parts:
+        if not has_legacy:
+            return pl.DataFrame()
+        panel = legacy_pd
+    else:
+        panel = parts[0]
+        for part in parts[1:]:
+            panel = panel.join(part, on=PANEL_KEY, how="full", coalesce=True)
+        if has_legacy:
+            panel = _fill_nulls_from(panel, legacy_pd)
 
     # Quarter-end filter: drop stub periods that are not quarter ends.
     panel = panel.filter(
@@ -734,9 +922,12 @@ def build_panel(
         & (pl.col("period").dt.day() >= 28)
     )
 
+    panel = add_basis(panel)
     if derived:
         panel = add_derived(panel)
 
     front = [c for c in PANEL_KEY if c in panel.columns]
+    if "basis" in panel.columns:
+        front.append("basis")
     rest = sorted(c for c in panel.columns if c not in front)
     return panel.select([*front, *rest]).sort(["ticker", "period"])

@@ -27,7 +27,7 @@ from typing import Any
 
 import polars as pl
 
-from . import edgar, filings, instance, taxonomy
+from . import edgar, filings, instance, parallel, taxonomy, variables
 from .config import Bank, universe
 from .filings import Filing
 
@@ -160,54 +160,58 @@ def dimensional_long(
     tags: Iterable[str] | None = None,
     filing_list: list[Filing] | None = None,
 ) -> pl.DataFrame:
-    """Parse every cached filing instance for a bank into the long schema."""
+    """Parse every cached filing instance for a bank into the long schema.
+
+    Fetching is serial and parsing is not.  Instance documents are the
+    pipeline's single largest cost -- 1,666 of them for a 2013 start -- and
+    parsing them is pure CPU on independent files, so it goes to a pool while
+    the downloads stay behind the one shared rate limiter.
+    """
     fs = filing_list or filings.list_filings(bank, since=since, forms=forms)
     wanted = set(tags) if tags is not None else None
-    frames: list[pl.DataFrame] = []
 
-    for f in fs:
-        try:
-            df = instance.parse_instance(f)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("instance parse failed %s %s: %s", f.ticker, f.accn, exc)
-            continue
-        if df.is_empty():
-            continue
-        if wanted is not None:
-            df = df.filter(pl.col("tag").is_in(list(wanted)))
-            if df.is_empty():
-                continue
-        frames.append(
-            df.select(
-                pl.col("bank"),
-                pl.col("ticker"),
-                pl.col("cik"),
-                pl.col("namespace"),
-                pl.col("tag"),
-                pl.col("period_end").alias("period"),
-                pl.col("period_start"),
-                pl.col("instant"),
-                pl.col("value"),
-                pl.col("unit"),
-                pl.col("form"),
-                pl.lit(None, dtype=pl.Int32).alias("fy"),
-                pl.lit(None, dtype=pl.String).alias("fp"),
-                pl.col("accn"),
-                pl.col("filing_date").alias("filed"),
-                pl.lit("instance", dtype=pl.String).alias("source"),
-                pl.col("segment"),
-                pl.col("loan_class"),
-                pl.col("credit_quality"),
-                pl.col("past_due"),
-                pl.col("other_dims"),
-                pl.col("dim_axes"),
-                pl.col("n_dims"),
-            )
-        )
-
-    if not frames:
+    fs = [f for f in fs if instance.ensure_cached(f)]
+    parsed = parallel.map_frames(
+        instance.parse_instance,
+        fs,
+        schema=instance.empty_frame().schema,
+        label="instance parse",
+        describe=lambda f: f"{f.ticker} {f.accn}",
+    )
+    if parsed.is_empty():
         return empty_long()
-    return pl.concat(frames, how="vertical_relaxed").cast(LONG_SCHEMA)  # type: ignore[arg-type]
+    if wanted is not None:
+        parsed = parsed.filter(pl.col("tag").is_in(list(wanted)))
+        if parsed.is_empty():
+            return empty_long()
+
+    return (
+        parsed.select(
+            pl.col("bank"),
+            pl.col("ticker"),
+            pl.col("cik"),
+            pl.col("namespace"),
+            pl.col("tag"),
+            pl.col("period_end").alias("period"),
+            pl.col("period_start"),
+            pl.col("instant"),
+            pl.col("value"),
+            pl.col("unit"),
+            pl.col("form"),
+            pl.lit(None, dtype=pl.Int32).alias("fy"),
+            pl.lit(None, dtype=pl.String).alias("fp"),
+            pl.col("accn"),
+            pl.col("filing_date").alias("filed"),
+            pl.lit("instance", dtype=pl.String).alias("source"),
+            pl.col("segment"),
+            pl.col("loan_class"),
+            pl.col("credit_quality"),
+            pl.col("past_due"),
+            pl.col("other_dims"),
+            pl.col("dim_axes"),
+            pl.col("n_dims"),
+        ).cast(LONG_SCHEMA)  # type: ignore[arg-type]
+    )
 
 
 # --------------------------------------------------------------------------
@@ -222,6 +226,12 @@ def attach_categories(df: pl.DataFrame) -> pl.DataFrame:
     specific, so it wins.  Facts whose member is a measurement-basis qualifier
     (held-for-sale, unfunded) get ``scope`` set and no loan category, which
     keeps them out of the held-for-investment portfolio mix.
+
+    ``pd_cat`` has a second source.  A pre-2018 filing puts no delinquency
+    axis on the fact at all -- it uses one element per bucket -- so where the
+    member says nothing the bucket is read off the tag.  That cannot leak into
+    the axis-based delinquency builder, which filters on
+    :data:`variables.LOAN_TAGS`, and these elements are not loan tags.
     """
     if df.is_empty():
         return df.with_columns(
@@ -235,12 +245,18 @@ def attach_categories(df: pl.DataFrame) -> pl.DataFrame:
     cqs = df["credit_quality"].to_list()
     pds = df["past_due"].to_list()
     others = df["other_dims"].to_list()
+    axes = df["dim_axes"].to_list()
 
     loan_cat: list[str | None] = []
     scope: list[str | None] = []
-    for t, cls, seg, other in zip(tickers, classes, segments, others, strict=True):
+    for t, cls, seg, other, ax in zip(
+        tickers, classes, segments, others, axes, strict=True
+    ):
         member = cls or seg
-        sc = taxonomy.scope_of(cls) or taxonomy.scope_of(seg)
+        # The axis-conditional table first: it exists precisely for members
+        # whose plain reading is right somewhere else in the same filing.
+        sc = taxonomy.axis_scope_of(member, t, ax)
+        sc = sc or taxonomy.scope_of(cls) or taxonomy.scope_of(seg)
         if sc is None and other:
             for part in other.split(";"):
                 _, _, val = part.partition("=")
@@ -248,10 +264,16 @@ def attach_categories(df: pl.DataFrame) -> pl.DataFrame:
                 if sc:
                     break
         scope.append(sc)
-        loan_cat.append(taxonomy.loan_category(member, t) if member else None)
+        loan_cat.append(
+            None if sc else (taxonomy.loan_category(member, t) if member else None)
+        )
 
     cq_cat = [taxonomy.credit_quality(m, t) for m, t in zip(cqs, tickers, strict=True)]
-    pd_cat = [taxonomy.past_due(m, t) for m, t in zip(pds, tickers, strict=True)]
+    legacy_pd = variables.LEGACY_PAST_DUE_BY_TAG
+    pd_cat = [
+        taxonomy.past_due(m, t) or legacy_pd.get(tag)
+        for m, t, tag in zip(pds, tickers, df["tag"].to_list(), strict=True)
+    ]
 
     return df.with_columns(
         pl.Series("loan_cat", loan_cat, dtype=pl.String),
@@ -356,7 +378,13 @@ def extract_universe(
 
 
 def relevant_tags() -> set[str]:
-    """Every tag named by a variable definition."""
-    from .variables import ALL_VARS
+    """Every tag the panel can read.
 
-    return {t for v in ALL_VARS for t in v.tags}
+    The pre-2018 delinquency elements belong to no :class:`VarDef` -- they are
+    one element per bucket rather than one element sliced by an axis -- so
+    they have to be named here as well, or the extraction filter drops them
+    before ``panel`` ever sees them.
+    """
+    from .variables import ALL_VARS, LEGACY_PAST_DUE_BY_TAG
+
+    return {t for v in ALL_VARS for t in v.tags} | set(LEGACY_PAST_DUE_BY_TAG)
