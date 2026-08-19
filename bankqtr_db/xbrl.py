@@ -227,6 +227,11 @@ def attach_categories(df: pl.DataFrame) -> pl.DataFrame:
     (held-for-sale, unfunded) get ``scope`` set and no loan category, which
     keeps them out of the held-for-investment portfolio mix.
 
+    A member that rolls up others the same filing breaks out separately is
+    scoped rather than read as a class, which needs the whole bank-quarter in
+    view: the same member is the only residential figure Wells Fargo publishes
+    in its recent quarters, and a double count in the ones before them.
+
     ``pd_cat`` has a second source.  A pre-2018 filing puts no delinquency
     axis on the fact at all -- it uses one element per bucket -- so where the
     member says nothing the bucket is read off the tag.  That cannot leak into
@@ -245,17 +250,40 @@ def attach_categories(df: pl.DataFrame) -> pl.DataFrame:
     cqs = df["credit_quality"].to_list()
     pds = df["past_due"].to_list()
     others = df["other_dims"].to_list()
-    axes = df["dim_axes"].to_list()
+    periods = df["period"].to_list()
+
+    # Which component members each bank-quarter discloses, so a rollup can be
+    # recognised as one only where its parts are actually there.
+    wanted = taxonomy.component_members()
+    instants = df["instant"].to_list()
+    seen: dict[tuple[str | None, Any], set[str]] = {}
+    for t, per, cls, seg, inst in zip(
+        tickers, periods, classes, segments, instants, strict=True
+    ):
+        if not inst:
+            continue
+        for m in (cls, seg):
+            if m in wanted:
+                seen.setdefault((t, per), set()).add(m)
+    present = {k: frozenset(v) for k, v in seen.items()}
+    empty: frozenset[str] = frozenset()
 
     loan_cat: list[str | None] = []
     scope: list[str | None] = []
-    for t, cls, seg, other, ax in zip(
-        tickers, classes, segments, others, axes, strict=True
+    for t, per, cls, seg, other, inst in zip(
+        tickers, periods, classes, segments, others, instants, strict=True
     ):
         member = cls or seg
-        # The axis-conditional table first: it exists precisely for members
-        # whose plain reading is right somewhere else in the same filing.
-        sc = taxonomy.axis_scope_of(member, t, ax)
+        # The rollup test first: it exists precisely for members whose plain
+        # reading is the right one in a quarter that lacks the breakdown.
+        # Balances only -- the overlap it prevents is a balance-sheet one, and
+        # Wells Fargo reports residential charge-offs and recoveries on the
+        # parent alone, so suppressing it for flows loses them for nothing.
+        sc = (
+            taxonomy.superseded_scope(member, t, present.get((t, per), empty))
+            if inst
+            else None
+        )
         sc = sc or taxonomy.scope_of(cls) or taxonomy.scope_of(seg)
         if sc is None and other:
             for part in other.split(";"):

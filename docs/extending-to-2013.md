@@ -447,12 +447,28 @@ parent as a class *beside its own child* put residential at 57% of a book where
 it is 29%.
 
 Overrides key on `(ticker, member)`, and that is not enough here: the **same
-member, at the same bank, in the same filing** is the correct reading on the
-modern class axis, where it is tagged alone. So `taxonomy.AXIS_SCOPE` also
-holds the axis a reading applies to, and `axis_scope_of` fires only when that
-axis is present *and* no modern loan axis is -- which is what makes the member
-unambiguously the one promoted from that axis rather than from a
-higher-priority one on the same fact.
+member, at the same bank, in the same filing** is the correct reading where it
+is tagged alone. The first attempt made the override axis-conditional, which
+fixed the 10-Q quarters and left a 3% residual in the 10-K ones, where the
+parent comes off the modern axis and the junior lien off the legacy one, so the
+junior lien sat inside both `resi_mortgage` and `home_equity`.
+
+The general rule is simpler than the axis one and closes both: **a rollup is
+only a rollup when its parts are there.** `taxonomy.SUPERSEDED_BY` names the
+components that supersede a member, and `attach_categories` decides per
+bank-quarter from the members actually present -- which is the only place the
+question can be answered, since the same member is a double count in one
+quarter and the only figure published in the next.
+
+Two scoping details, both found by measurement:
+
+* **Balances only.** Wells Fargo reports residential charge-offs and recoveries
+  on the parent alone, so suppressing it for flows dropped three quarters of
+  `nco_resi_mortgage` for nothing. The overlap being prevented is a
+  balance-sheet one -- the liens partition the parent's *balance*.
+* **Components must be present.** In the 15 recent quarters Wells Fargo stopped
+  tagging the split, and there the parent is the only residential figure there
+  is.
 
 The safety condition was checked across all 58 quarters rather than assumed:
 
@@ -470,14 +486,32 @@ figure at all. Measured across the three regimes:
 |---|---|---|
 | 2021 10-Q quarters, `resi_pct` | 57% | **29%** |
 | 2021 10-Q quarters, `mix_coverage_pct` | 128-130 | **99** |
-| 2013 quarters | 100.0 | **unchanged** |
-| 2025-26, rollup-only quarters | 100.0 | **unchanged** |
+| 2021 10-K quarter, `resi_mortgage` | 258.89 (incl. junior lien) | **242.27** |
+| 2021 10-K quarter, `mix_coverage_pct` | 103.3 | **101.4** |
+| 2013 quarters | 100.0 | unchanged |
+| 2025-26, rollup-only quarters | parent kept | unchanged |
 
-A 3% residual remains in the 10-K quarters, where residential is read off the
-modern axis as the parent while home equity comes off the legacy axis as the
-junior lien, so the junior lien sits inside both. That is inside the band the
-coherence metric exists to show, and unlike the 30% version it does not change
-the ranking of anything.
+`resi_pct` across 2021Q1-2022Q2 now runs 30.1, 29.2, 28.6, 27.4, 27.2, 27.1 --
+a series rather than a saw-tooth, because every quarter is now the first-lien
+figure rather than alternating between that and the parent.
+
+## 11. The coherence metric could go stale
+
+Found while checking the above. `mix_coverage_pct` read a flawless **100.0**
+for Wells Fargo in 2025-26 where the true figure was 101.7.
+
+It is computed in `panel.add_derived`, which runs on the XBRL frame -- before
+the HTML and IR fallbacks have filled anything. `reconcile.refresh_ratios`
+recomputes the `RatioDef`s afterwards, but `mix_coverage_pct` is not a
+`RatioDef`, so nothing recomputed it. Any fallback that filled a loan category
+changed the true coverage and left the old number in place.
+
+97 bank-quarters across twelve banks were carrying a stale score, 14 of them
+reading exactly 100.0. That is the third time in this work that the number
+meant to signal "safe to rank on" was the one that lied, so it is now
+recomputed outright rather than gap-filled -- a stale coherence score is worse
+than a missing one -- and `refresh_ratios` runs after every fallback rather
+than only after the IR one, because the HTML path fills columns too.
 
 Purchased-credit-impaired needed one more spelling in the same pass: Truist
 writes `PCIMember` in capitals, which the `Pci` alternation missed. The

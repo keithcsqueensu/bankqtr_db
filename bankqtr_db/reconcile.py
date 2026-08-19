@@ -21,6 +21,7 @@ import logging
 
 import polars as pl
 
+from . import panel as panel_mod
 from .config import THIN_LOAN_BOOK, Bank, universe
 from .variables import RATIOS
 
@@ -392,6 +393,11 @@ def refresh_ratios(panel: pl.DataFrame) -> pl.DataFrame:
     fallbacks have filled anything, so a CRE balance recovered from a
     supplement would leave ``cre_pct`` null.  Only null ratio cells are
     written, so an already-computed ratio is never disturbed.
+
+    ``mix_coverage_pct`` is the exception and is recomputed outright.  It is
+    the column consumers are told to filter on, and a fallback that fills a
+    loan category changes its value rather than filling a gap -- so leaving the
+    earlier figure in place reports coherence the panel no longer has.
     """
     if panel.is_empty():
         return panel
@@ -427,7 +433,7 @@ def refresh_ratios(panel: pl.DataFrame) -> pl.DataFrame:
             .alias(source),
             pl.col(ratio.name).fill_null(value).alias(ratio.name),
         )
-    return out
+    return panel_mod.with_mix_coverage(out)
 
 
 # --------------------------------------------------------------------------

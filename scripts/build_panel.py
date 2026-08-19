@@ -261,10 +261,11 @@ def main() -> int:
     if ir_rows is not None and not ir_rows.is_empty():
         before = _filled_cells(final)
         final = reconcile.merge_ir(final, ir_rows)
-        # Ratios are computed on the XBRL frame, so anything the supplements
-        # just filled has no ratio yet.
-        final = reconcile.refresh_ratios(final)
         print(f"  ir filled {_filled_cells(final) - before:,} panel cells", flush=True)
+    # Ratios are computed on the XBRL frame, so anything a fallback filled has
+    # no ratio yet -- and mix_coverage_pct, which every fallback can change,
+    # has a stale one.  Unconditional: the HTML path fills columns too.
+    final = reconcile.refresh_ratios(final)
 
     coverage = reconcile.coverage_report(final, banks=banks)
     flags = reconcile.quality_flags(final)

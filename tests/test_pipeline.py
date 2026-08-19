@@ -969,30 +969,49 @@ def test_unfunded_commitments_keeps_its_small_first_choice() -> None:
 # ---- a member that is a class on one axis and a rollup on another --------
 
 
-def test_a_rollup_is_suppressed_only_on_the_axis_that_carries_its_children() -> None:
-    """Wells Fargo tags residential mortgage as parent and children together.
+def test_a_rollup_is_suppressed_only_where_its_components_are_disclosed() -> None:
+    """A rollup is only a rollup when its parts are there.
 
-    On the pre-2018 receivable-type axis the parent sits beside its first-lien
-    and junior-lien children, so reading it as a class counts the first lien
-    twice.  On the modern class axis it is tagged alone and is the right
-    reading.  A plain ``(ticker, member)`` override cannot tell those apart.
+    Wells Fargo tags residential mortgage as the parent and both liens at
+    once, so reading the parent as a class counts the junior lien in both
+    ``resi_mortgage`` and ``home_equity``.  In its recent quarters it stopped
+    tagging the split, and there the same member is the only residential
+    figure published -- so this cannot be decided from the member, or from the
+    axis, but only from what the bank-quarter actually contains.
     """
     assert (
-        taxonomy.axis_scope_of("ResidentialMortgageMember", "WFC", LEGACY_CLS)
+        taxonomy.superseded_scope(
+            "ResidentialMortgageMember", "WFC", frozenset({"FirstMortgageMember"})
+        )
         == "rollup"
     )
-    # ...but not on the modern axis, nor on a fact carrying both, nor for a
-    # bank that tags the member as an ordinary class.
-    assert taxonomy.axis_scope_of("ResidentialMortgageMember", "WFC", CLS) is None
     assert (
-        taxonomy.axis_scope_of(
-            "ResidentialMortgageMember", "WFC", f"{LEGACY_CLS}|{CLS}"
+        taxonomy.superseded_scope("ResidentialMortgageMember", "WFC", frozenset())
+        is None
+    )
+    # ...and never for a bank that tags the member as an ordinary class.
+    assert (
+        taxonomy.superseded_scope(
+            "ResidentialMortgageMember", "PNC", frozenset({"FirstMortgageMember"})
         )
         is None
     )
-    assert (
-        taxonomy.axis_scope_of("ResidentialMortgageMember", "PNC", LEGACY_CLS) is None
-    )
+
+
+def test_a_rollup_survives_where_the_split_is_not_tagged() -> None:
+    """The 15 recent Wells Fargo quarters: the parent is all there is."""
+    rows = [
+        fact(
+            ticker="WFC",
+            period=dt.date(2026, 6, 30),
+            value=240.77,
+            loan_class="ResidentialMortgageMember",
+            dim_axes=CLS,
+            n_dims=1,
+        )
+    ]
+    out = panel.build_panel(frame(rows), derived=False)
+    assert out["loans_resi_mortgage"][0] == pytest.approx(240.77)
 
 
 def test_wells_fargo_first_lien_is_not_double_counted() -> None:
@@ -1028,6 +1047,44 @@ def test_wells_fargo_first_lien_is_not_double_counted() -> None:
     assert out["loans_home_equity"][0] == pytest.approx(16.62)
 
 
+def test_wells_fargo_junior_lien_is_not_counted_in_both_columns() -> None:
+    """The 10-K shape: the parent is on the modern axis, the liens on the old one.
+
+    258.89 = 242.27 + 16.62 to the dollar, so reading the parent as
+    ``resi_mortgage`` beside ``home_equity`` counts the junior lien twice.
+    """
+    rows = [
+        fact(
+            ticker="WFC",
+            period=dt.date(2021, 12, 31),
+            value=258.89,
+            loan_class="ResidentialMortgageMember",
+            segment="ConsumerPortfolioSegmentMember",
+            dim_axes=f"{SEG}|{CLS}",
+            n_dims=2,
+        ),
+        fact(
+            ticker="WFC",
+            period=dt.date(2021, 12, 31),
+            value=242.27,
+            loan_class="FirstMortgageMember",
+            dim_axes=LEGACY_CLS,
+            n_dims=1,
+        ),
+        fact(
+            ticker="WFC",
+            period=dt.date(2021, 12, 31),
+            value=16.62,
+            loan_class="SecondMortgageMember",
+            dim_axes=LEGACY_CLS,
+            n_dims=1,
+        ),
+    ]
+    out = panel.build_panel(frame(rows), derived=False)
+    assert out["loans_resi_mortgage"][0] == pytest.approx(242.27)
+    assert out["loans_home_equity"][0] == pytest.approx(16.62)
+
+
 def test_purchased_credit_impaired_is_caught_in_either_casing() -> None:
     """Truist spells it PCI; the guard on "Excluding" still has to hold."""
     for member in (
@@ -1043,3 +1100,37 @@ def test_purchased_credit_impaired_is_caught_in_either_casing() -> None:
         taxonomy.loan_category("ConsumerPortfolioSegmentExcludingPCIMember")
         == "consumer_total"
     )
+
+
+def test_a_rollup_is_kept_for_flows() -> None:
+    """Wells Fargo reports residential charge-offs on the parent alone.
+
+    The overlap the rollup test prevents is a balance-sheet one: the liens
+    partition the parent's *balance*.  They carry no charge-offs of their own,
+    so suppressing the parent for flows would drop the only figure there is.
+    """
+    co = variables.BY_NAME["charge_offs"]
+    rows = [
+        fact(
+            ticker="WFC",
+            period=dt.date(2021, 12, 31),
+            value=242.27,
+            loan_class="FirstMortgageMember",
+            dim_axes=LEGACY_CLS,
+            n_dims=1,
+        ),
+        fact(
+            ticker="WFC",
+            tag=co.tags[0],
+            instant=False,
+            period_start=dt.date(2021, 10, 1),
+            period=dt.date(2021, 12, 31),
+            value=0.04,
+            loan_class="ResidentialMortgageMember",
+            dim_axes=CLS,
+            n_dims=1,
+        ),
+    ]
+    out = panel.build_panel(frame(rows), derived=False)
+    assert out["loans_resi_mortgage"][0] == pytest.approx(242.27)
+    assert out["charge_offs_resi_mortgage"][0] == pytest.approx(0.04)

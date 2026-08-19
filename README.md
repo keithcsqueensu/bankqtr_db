@@ -192,6 +192,11 @@ because the rest of those breakdowns genuinely is not mapped. When one member
 absorbs the whole book, the leaves sum to the total by construction — so treat
 a suspiciously perfect score on a bank with few populated categories as a
 reason to look at `panel_unmapped_members.csv`, not as a clean bill of health.
+
+It could also go **stale**. It is computed on the XBRL frame, and until it was
+recomputed after the fallbacks, any HTML or IR value that filled a loan
+category left the earlier score standing — 97 bank-quarters across twelve banks
+were carrying one, 14 of them reading exactly 100.0.
 In practice the incoherent rows concentrate in the custody, broker and specialty
 names (BNY Mellon, Morgan Stanley, Schwab, Santander USA), whose loan disclosures
 are small and irregularly structured; the regional and universal banks that

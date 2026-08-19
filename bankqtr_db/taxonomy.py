@@ -530,49 +530,44 @@ MODERN_LOAN_AXES: tuple[str, ...] = (
     "ProductOrServiceAxis",
 )
 
-# Members whose reading depends on *which axis carries them*, keyed by
-# (ticker, member) and holding (axis, scope).  A plain override cannot express
-# this: the same member is a class on one axis and a rollup on another, at the
-# same bank in the same filing.
+# Members that are a rollup of other members the same filer also tags, keyed by
+# (ticker, member) and holding the components that supersede it.
 #
-# Wells Fargo is the case.  On the pre-2018 receivable-type axis it tags
-# residential mortgage as the parent *and* its first-lien and junior-lien
-# children together -- 258.9 = 242.3 + 16.6 at 2021Q4, to the dollar -- so
-# reading the parent as a class counts the first lien twice and put residential
-# at 57% of a book where it is 29%.  On the modern class axis it tags only the
-# parent, and there the reading is right.
+# A rollup is only a rollup when its parts are there.  The same member can be
+# the best available reading of a category in one quarter and a double count in
+# the next, at the same bank, depending on nothing but whether that filing
+# broke the balance down -- so this is decided per bank-quarter, from the
+# members actually present, rather than per member or per axis.
 #
-# The condition is checked against the data rather than assumed: across 58
-# quarters there is **no** period where Wells Fargo puts this member on the
-# receivable-type axis without also tagging ``FirstMortgageMember``, and the
-# 15 recent quarters that carry the member alone carry it only on the modern
-# axis.  So suppressing it here can never leave the bank with no residential
-# figure at all.
-AXIS_SCOPE: dict[tuple[str, str], tuple[str, str]] = {
-    ("WFC", "ResidentialMortgageMember"): (
-        "AccountsNotesLoansAndFinancingReceivableByReceivableTypeAxis",
-        "rollup",
-    ),
+# Wells Fargo is the case.  It tags residential mortgage as the parent and both
+# liens at once, and the arithmetic is exact at 2021Q4: 258.89 = 242.27 (first)
+# + 16.62 (junior).  The junior lien maps to home_equity, so reading the parent
+# as resi_mortgage counts that lien in both columns.  Suppressing the parent
+# wherever the first lien is tagged leaves the two liens to partition it, and
+# leaves the parent alone in the 15 recent quarters where Wells Fargo stopped
+# tagging the split and it is the only residential figure there is.
+SUPERSEDED_BY: dict[tuple[str, str], tuple[str, ...]] = {
+    ("WFC", "ResidentialMortgageMember"): ("FirstMortgageMember",),
 }
 
 
-def axis_scope_of(
-    member: str | None, ticker: str | None, dim_axes: str | None
-) -> str | None:
-    """Scope implied by the axis a member sits on, not by the member alone.
+def component_members() -> set[str]:
+    """Every member that can supersede a rollup, for the presence scan."""
+    return {m for members in SUPERSEDED_BY.values() for m in members}
 
-    Returns a scope only when the named axis is present *and* no modern loan
-    axis is, which is what makes the member unambiguously the one promoted
-    from that axis rather than from a higher-priority one on the same fact.
+
+def superseded_scope(
+    member: str | None, ticker: str | None, present: frozenset[str]
+) -> str | None:
+    """Scope for a rollup whose components are tagged in the same bank-quarter.
+
+    ``present`` is the set of component members seen for that bank and period,
+    which is why this cannot be decided from the member alone.
     """
-    hit = AXIS_SCOPE.get((ticker or "", member or ""))
-    if hit is None:
+    components = SUPERSEDED_BY.get((ticker or "", member or ""))
+    if not components:
         return None
-    axis, scope = hit
-    axes = set((dim_axes or "").split("|"))
-    if axis not in axes or axes & set(MODERN_LOAN_AXES):
-        return None
-    return scope
+    return "rollup" if any(c in present for c in components) else None
 
 
 _unmapped: Counter[tuple[str, str]] = Counter()

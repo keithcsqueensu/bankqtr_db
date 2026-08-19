@@ -757,6 +757,54 @@ def add_basis(df: pl.DataFrame) -> pl.DataFrame:
 # --------------------------------------------------------------------------
 
 
+# The disjoint leaf categories.  Deliberately not the rollups: summing
+# cre_total beside its own construction and multifamily members, or
+# commercial_total beside the classes underneath it, would count the same
+# balance twice and make the coherence metric read high for the wrong reason.
+MIX_LEAF_CATEGORIES: tuple[str, ...] = (
+    "cre_total",
+    "ci",
+    "small_business",
+    "lease",
+    "municipal",
+    "fund_finance",
+    "financial_institutions",
+    "commercial_other",
+    "resi_mortgage",
+    "home_equity",
+    "credit_card",
+    "auto",
+    "student",
+    "securities_based",
+    "consumer_other",
+    "other",
+)
+
+
+def with_mix_coverage(df: pl.DataFrame) -> pl.DataFrame:
+    """(Re)compute ``mix_coverage_pct``: leaf categories over reported loans.
+
+    Always recomputed rather than gap-filled.  This is the column a consumer
+    is told to filter on before ranking peers, and a *stale* coherence score is
+    worse than a missing one -- it was reading a flawless 100.0 for Wells Fargo
+    in quarters where the true figure was 101.7, because the fallbacks had
+    filled a loan category after ``add_derived`` had already run.
+    """
+    leaf = [f"loans_{c}" for c in MIX_LEAF_CATEGORIES if f"loans_{c}" in df.columns]
+    if not leaf or "loans_total" not in df.columns:
+        return df
+    return df.with_columns(
+        pl.when(pl.col("loans_total").abs() > 0)
+        .then(
+            pl.sum_horizontal([pl.col(c).fill_null(0.0) for c in leaf])
+            / pl.col("loans_total")
+            * 100
+        )
+        .otherwise(None)
+        .alias("mix_coverage_pct")
+    )
+
+
 def add_derived(df: pl.DataFrame) -> pl.DataFrame:
     """NPAs, ratios and growth rates, skipping anything whose inputs are absent."""
     have = set(df.columns)
@@ -793,39 +841,8 @@ def add_derived(df: pl.DataFrame) -> pl.DataFrame:
     # total the disjoint leaf categories actually account for: near 100 means
     # the mix is coherent, well above 100 means categories overlap, well below
     # means the breakdown is partial.  Filter on it before ranking peers.
-    leaf = [
-        f"loans_{c}"
-        for c in (
-            "cre_total",
-            "ci",
-            "small_business",
-            "lease",
-            "municipal",
-            "fund_finance",
-            "financial_institutions",
-            "commercial_other",
-            "resi_mortgage",
-            "home_equity",
-            "credit_card",
-            "auto",
-            "student",
-            "securities_based",
-            "consumer_other",
-            "other",
-        )
-        if f"loans_{c}" in have
-    ]
-    if leaf and "loans_total" in have:
-        df = df.with_columns(
-            pl.when(pl.col("loans_total").abs() > 0)
-            .then(
-                pl.sum_horizontal([pl.col(c).fill_null(0.0) for c in leaf])
-                / pl.col("loans_total")
-                * 100
-            )
-            .otherwise(None)
-            .alias("mix_coverage_pct")
-        )
+    df = with_mix_coverage(df)
+    if "mix_coverage_pct" in df.columns:
         have.add("mix_coverage_pct")
 
     exprs = []
