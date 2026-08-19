@@ -32,6 +32,7 @@ import logging
 import os
 from collections.abc import Callable, Iterable
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from typing import Any
 
 import polars as pl
@@ -62,6 +63,11 @@ def max_workers() -> int:
 # That start-up cost was eating most of what the parallelism won.
 _POOL: ProcessPoolExecutor | None = None
 
+# Set once a pool has failed to start, so the fallback is paid for once rather
+# than on every call.  ``dimensional_long`` runs per bank; without this a
+# caller with no main guard would eat 31 pool failures instead of one.
+_POOL_UNAVAILABLE = False
+
 
 def _shared_pool(workers: int) -> ProcessPoolExecutor:
     global _POOL
@@ -77,6 +83,20 @@ def shutdown() -> None:
     pool, _POOL = _POOL, None
     if pool is not None:
         pool.shutdown(wait=False, cancel_futures=True)
+
+
+# Windows spawns workers rather than forking, so each one re-imports the
+# module that started them.  A caller whose module-level code does real work --
+# a script without an ``if __name__ == "__main__":`` guard -- therefore runs
+# that work again in every worker, and the pool dies with a BrokenProcessPool
+# naming none of it.  ``scripts/build_panel.py`` has the guard; a notebook or a
+# one-off script written against the library may not.
+NO_MAIN_GUARD_HINT = (
+    "parallel parsing is unavailable, falling back to one core (%s). On Windows "
+    "each worker re-imports the calling module, so a script that calls into "
+    "this library needs its work behind `if __name__ == \"__main__\":`. "
+    "Set BANKQTR_WORKERS=1 to select the serial path deliberately."
+)
 
 
 def _run(args: tuple[Callable[..., pl.DataFrame], Any]) -> Any:
@@ -109,14 +129,25 @@ def map_frames[T](
     # Sized from the machine, never from this batch: the pool is shared, and a
     # first call with two items must not leave every later call with two
     # workers.  A batch too small to be worth the hand-off stays inline.
+    global _POOL_UNAVAILABLE
     workers = max_workers()
-    if workers <= 1 or len(work) < 2:
+    if workers <= 1 or len(work) < 2 or _POOL_UNAVAILABLE:
         results: list[Any] = [_run((fn, item)) for item in work]
     else:
         # chunksize amortises the per-item IPC round trip; these items are
         # tens to hundreds of milliseconds each, so a small chunk is enough.
-        pool = _shared_pool(workers)
-        results = list(pool.map(_run, ((fn, item) for item in work), chunksize=4))
+        try:
+            pool = _shared_pool(workers)
+            results = list(pool.map(_run, ((fn, item) for item in work), chunksize=4))
+        except BrokenProcessPool as exc:
+            # Redo the whole batch rather than salvage part of it: ``fn`` is a
+            # pure parse of one document, so repeating it is free of side
+            # effects, and a half-collected batch would silently short the
+            # frame.
+            log.warning(NO_MAIN_GUARD_HINT, exc)
+            shutdown()
+            _POOL_UNAVAILABLE = True
+            results = [_run((fn, item)) for item in work]
 
     frames: list[pl.DataFrame] = []
     for item, result in zip(work, results, strict=True):

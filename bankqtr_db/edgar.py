@@ -107,6 +107,34 @@ def company_facts(cik: str, *, refresh: bool = False) -> dict[str, Any]:
     return payload
 
 
+def submissions_shard(name: str, *, refresh: bool = False) -> dict[str, Any]:
+    """One overflow shard of a submissions index, cached like the main file.
+
+    ``filings.list_filings`` walks every shard for every bank on every call,
+    and a universe run calls it once per bank per stage.  Uncached that is
+    dozens of requests for data that only changes when a bank files -- and it
+    is what draws a 429 first, because the shards are fetched in a tight loop
+    while the main files are all coming from disk.
+
+    Cached on the same terms as :func:`submissions`: a build sees the filing
+    index as of the last refresh, which is already true of the main file, so
+    this does not make the window any staler than it was.
+    """
+    safe = "".join(c for c in name if c.isalnum() or c in "-_.")
+    path = RAW_FACTS / f"SUBSHARD_{safe}.gz"
+    if path.exists() and not refresh:
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
+            return json.load(fh)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = get(f"https://data.sec.gov/submissions/{name}").json()
+    tmp = path.with_suffix(".tmp")
+    with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+        json.dump(payload, fh)
+    tmp.replace(path)
+    return payload
+
+
 def submissions(cik: str, *, refresh: bool = False) -> dict[str, Any]:
     path = RAW_FACTS / f"SUB{cik}.json.gz"
     if path.exists() and not refresh:

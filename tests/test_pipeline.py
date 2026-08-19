@@ -12,7 +12,16 @@ import datetime as dt
 import polars as pl
 import pytest
 
-from bankqtr_db import html_fallback, instance, panel, taxonomy, variables, xbrl
+from bankqtr_db import (
+    edgar,
+    html_fallback,
+    instance,
+    panel,
+    parallel,
+    taxonomy,
+    variables,
+    xbrl,
+)
 
 # --------------------------------------------------------------------------
 # Taxonomy
@@ -1348,3 +1357,93 @@ def test_net_and_gross_charge_offs_land_in_their_own_columns(
         if _re.search(pattern, label, _re.IGNORECASE)
     )
     assert matched == expected
+
+
+# --------------------------------------------------------------------------
+# Running the parse across cores
+# --------------------------------------------------------------------------
+
+
+def _one_row(n: int) -> pl.DataFrame:
+    """Module level so it can be pickled to a worker."""
+    return pl.DataFrame({"n": [n]})
+
+
+def _explodes(n: int) -> pl.DataFrame:
+    if n == 2:
+        raise ValueError("bad document")
+    return pl.DataFrame({"n": [n]})
+
+
+PARALLEL_SCHEMA = {"n": pl.Int64}
+
+
+def test_results_come_back_in_input_order() -> None:
+    """Not merely equivalent to the serial frame -- identical to it.
+
+    A panel that reshuffled between builds would make every diff unreadable,
+    so ``Executor.map`` is used for its ordering guarantee rather than
+    ``as_completed``.
+    """
+    out = parallel.map_frames(_one_row, range(25), schema=PARALLEL_SCHEMA)
+    assert out["n"].to_list() == list(range(25))
+
+
+def test_one_bad_document_does_not_end_the_run() -> None:
+    """Same contract as the serial loops this replaced."""
+    out = parallel.map_frames(_explodes, range(5), schema=PARALLEL_SCHEMA)
+    assert out["n"].to_list() == [0, 1, 3, 4]
+
+
+def test_an_unavailable_pool_falls_back_to_one_core(monkeypatch) -> None:
+    """Windows spawns workers, so a caller with no main guard breaks the pool.
+
+    It must degrade to the serial path rather than take the build down with a
+    BrokenProcessPool that names none of the cause.
+    """
+    monkeypatch.setattr(parallel, "_POOL_UNAVAILABLE", True)
+    out = parallel.map_frames(_one_row, range(6), schema=PARALLEL_SCHEMA)
+    assert out["n"].to_list() == list(range(6))
+
+
+def test_the_empty_batch_is_a_frame_not_a_crash() -> None:
+    out = parallel.map_frames(_one_row, [], schema=PARALLEL_SCHEMA)
+    assert out.is_empty()
+    assert out.columns == ["n"]
+
+
+# --------------------------------------------------------------------------
+# The submissions overflow shards
+# --------------------------------------------------------------------------
+
+
+def test_a_submissions_shard_is_fetched_once_and_then_cached(
+    tmp_path, monkeypatch
+) -> None:
+    """JPMorgan alone has 69 of them, walked on every list_filings call.
+
+    Uncached that is dozens of requests per build for an index that changes
+    only when a bank files, and it is what draws a 429 first: the shards go out
+    in a tight loop while every main file is coming from disk.
+    """
+    calls: list[str] = []
+
+    class _Resp:
+        @staticmethod
+        def json() -> dict:
+            return {"filings": {"recent": {}}}
+
+    def _fake_get(url: str, **_: object) -> _Resp:
+        calls.append(url)
+        return _Resp()
+
+    monkeypatch.setattr(edgar, "RAW_FACTS", tmp_path)
+    monkeypatch.setattr(edgar, "get", _fake_get)
+
+    name = "CIK0000019617-submissions-001.json"
+    first = edgar.submissions_shard(name)
+    second = edgar.submissions_shard(name)
+
+    assert first == second
+    assert len(calls) == 1, "the second call must come from disk"
+    assert (tmp_path / f"SUBSHARD_{name}.gz").exists()

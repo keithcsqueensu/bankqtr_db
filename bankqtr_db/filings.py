@@ -73,8 +73,7 @@ def list_filings(
     subs = edgar.submissions(bank.cik)
     rows = _rows_from_block(subs["filings"]["recent"])
     for extra in subs["filings"].get("files", []):
-        shard = edgar.get(f"https://data.sec.gov/submissions/{extra['name']}").json()
-        rows.extend(_rows_from_block(shard))
+        rows.extend(_rows_from_block(edgar.submissions_shard(extra["name"])))
 
     out: list[Filing] = []
     for r in rows:
