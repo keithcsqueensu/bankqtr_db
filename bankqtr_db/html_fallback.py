@@ -65,11 +65,17 @@ ACL_ROLLFORWARD = TableSpec(
         "ending balance",
     ),
     min_hits=3,
+    # Order is load-bearing: the first pattern to match a row label wins, and
+    # "net charge-offs" contains "charge-offs".  Listed the other way round --
+    # as it was -- the net rule is unreachable and every net figure is read as
+    # a gross one, which understates nothing and overstates charge_offs by the
+    # whole recovery rate.  Same trap as the net/gross element split in
+    # ``variables``, on the other side of the pipeline.
     row_map={
         r"beginning balance|balance,? (at )?beginning": "acl_beginning",
+        r"net charge.?offs": "nco",
         r"gross charge.?offs|charge.?offs": "charge_offs",
         r"recoveries": "recoveries",
-        r"net charge.?offs": "nco",
         r"provision": "provision",
         r"ending balance|balance,? (at )?end": "acl_ending",
     },
@@ -152,10 +158,20 @@ NONPERFORMING = TableSpec(
 # "Total loans to borrowers experiencing financial difficulty" is a
 # modification disclosure, not the loan book, and matches a naive
 # "total loans" pattern.
+# Labels whose row must never be read at all.  Two kinds.
+#
+# The first is a different population: held-for-sale, unfunded, modified.
+#
+# The second is a label that *negates* the concept it names, which is the same
+# trap ``taxonomy.LOAN_RULES`` guards three times over on the member side and
+# which this matcher had no notion of.  JPMorgan's 10-K cost all three:
+# "total consumer, excluding credit card loans" was read as the card book,
+# "noncriticized" as criticized, and "pre-provision profit" as the provision.
 EXCLUDE_LABEL = re.compile(
     r"experiencing financial difficulty|troubled debt|modification"
     r"|held for sale|unfunded|commitment|guarantee|servicing"
-    r"|fair value|weighted average|per share|percent|%",
+    r"|fair value|weighted average|per share|percent|%"
+    r"|\bexcluding\b|\bexcept\b|\bnon-?criticized\b|\bpre-?provision\b",
     re.IGNORECASE,
 )
 

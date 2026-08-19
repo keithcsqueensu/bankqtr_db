@@ -609,3 +609,92 @@ One row in 1,648 changes: Wells Fargo 2022Q3, 1.327tn to **931.3bn**, and
 for three parents out of six, was never read by anything, and a hand-kept
 partial copy of a hierarchy that already exists in `LOAN_CATEGORIES` is a copy
 that drifts. `taxonomy.descendants` derives it instead.
+
+## 13. Where JPMorgan's CRE actually was
+
+Prompted by a question about the FY2025 10-K: neither C&I nor CRE was populated
+for JPMorgan at 2025Q4, though the filing plainly shows both.
+
+**The table showing them is not XBRL-tagged.** It is MD&A -- "Selected
+metrics", Banking & Payments loans by client coverage segment. Every value in
+it (146,274 / 75,865 / 222,139 / 368,218 / 632,036) appears exactly once in the
+primary HTML document and **zero times** in the 14.9 MB instance. Only the
+statements and notes are tagged; MD&A is not. No amount of element or axis work
+reaches it.
+
+It is also a different basis. Those are *client coverage segments* within a
+$368bn Banking & Payments book. `loans_cre_total` elsewhere means a loan class
+of the whole $1,409bn book. Putting the one into the other would mix bases in a
+single column, which is the thing this panel is most careful not to do.
+
+**CRE was in the panel all along, under three other names.** JPMorgan tags no
+CRE rollup member, but it does tag multifamily ($105.1bn), commercial lessors
+($60.4bn) and construction and development ($12.4bn). `cre_total` -- the column
+`cre_pct` and `mix_coverage_pct` actually read -- was empty while its own parts
+sat beside it. `panel.with_cre_rollup` sums them where no total is tagged: 114
+bank-quarters across seven banks, and JPMorgan's coherence goes from 70.2% to
+82.6%.
+
+Two classes at least. One is not a partition of the CRE book, it is a part of
+it, and promoting it asserts the rest are zero -- Zions tags construction alone
+at $18-25m against a $57bn book, which reported a 0.0% CRE share for one of the
+most CRE-concentrated banks here. Left null it is honestly missing.
+
+**C&I was not missing, it was wrong.** `loans_ci` read $4.24bn, from the HTML
+fallback. Pulling on that found four more faults in the same parse of the same
+filing:
+
+| variable | label matched | |
+|---|---|---|
+| `loans_credit_card` | "total consumer, *excluding* credit card loans" | the negation |
+| `cq_criticized` | "*non*criticized" | the negation |
+| `provision` | "*pre-provision* profit" | a different concept |
+| `charge_offs` | "*net* charge-offs" | net read as gross |
+
+The last is an ordering bug of a kind this codebase documents elsewhere and had
+here anyway: row patterns are first-match-wins, and `charge.?offs` was listed
+above `net charge.?offs`, so the net rule was unreachable. The other three are
+the "excluding X must never be read as X" trap that `taxonomy.LOAN_RULES` guards
+three times over on the member side and `EXCLUDE_LABEL` did not guard at all.
+
+None of them had surfaced, because XBRL fills those columns first and
+`fill_gaps` writes only nulls. They were waiting for a bank that leaves the
+column empty, which is what JPMorgan does.
+
+The $4.24bn itself was a fifth fault. `classify_table` finds a table by its row
+labels, and JPMorgan has one for *wholesale alone* that answers to the same
+labels -- its own total is $369bn against a tagged book of $1,409bn. Its rows
+are real numbers about a quarter of the bank. `_reject_partial_book` asks a
+parsed table for its own total and drops every `loans_*` reading from a
+bank-quarter where the two disagree by more than a fifth.
+
+Nine bad `loans_ci` values go, with eight `loans_lease` and five
+`loans_credit_card`.
+
+### Why not PDF, and why not vision
+
+Both were considered.
+
+Rendering the filing to PDF and scraping that is a step backwards. HTML declares
+the grid in `<table>`/`<tr>`/`<td>`; PDF has no table structure at all, so
+extraction has to infer columns from x-coordinates. This repo already learned
+that on the IR side, where "PDF supplements are typeset without cell borders, so
+table detection has to guess column boundaries from whitespace and guesses
+differently for two blocks on the same page", and where the `edgar8k` route is
+preferred partly because it yields **HTML where the IR site serves a PDF**.
+
+More to the point, none of the five faults above is a *reading* failure. Every
+number was parsed correctly. What went wrong was which table, which column, and
+whether a label negates its concept -- and a renderer that discards the DOM
+makes all three harder rather than easier.
+
+A vision model would genuinely help with exactly those three questions, and it
+is the honest answer to "which of these tables is the consolidated one". The
+cost is the two properties this build is organised around: determinism, since
+serial and parallel builds are byte-identical today and a model in the loop is
+not, and auditability, since every cell carries a `*__source` and the IR path
+only reads layouts that were verified first. A vision extraction would also
+produce *very* plausible numbers, which is the failure mode every trap in this
+document shares. If it is used, it belongs behind the same allowlist discipline:
+cached by document hash, pinned to a model version, and never filling a column a
+tagged fact could have filled.

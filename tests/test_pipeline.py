@@ -12,7 +12,7 @@ import datetime as dt
 import polars as pl
 import pytest
 
-from bankqtr_db import instance, panel, taxonomy, variables, xbrl
+from bankqtr_db import html_fallback, instance, panel, taxonomy, variables, xbrl
 
 # --------------------------------------------------------------------------
 # Taxonomy
@@ -1219,3 +1219,99 @@ def test_siblings_that_nearly_sum_to_a_fourth_are_not_a_rollup() -> None:
     ]
     out = panel.build_panel(frame(rows), derived=False)
     assert out["loans_total"][0] == pytest.approx(43.586)
+
+
+# ---- CRE disclosed only as its classes ----------------------------------
+
+
+def test_cre_total_is_built_from_its_classes_when_no_total_is_tagged() -> None:
+    """JPMorgan tags no CRE rollup member, only the classes under it.
+
+    The CRE book was in the panel all along, spread across three columns,
+    while ``cre_total`` -- the one ``cre_pct`` and the coherence metric read --
+    stayed empty.
+    """
+    rows = [
+        fact(
+            period=dt.date(2025, 12, 31), value=v, loan_class=m, dim_axes=CLS, n_dims=1
+        )
+        for m, v in (
+            ("MultifamilyMember", 105.13),
+            ("WholesaleRealEstateCommercialLessorsMember", 60.41),
+            ("WholesaleRealEstateCommercialConstructionAndDevelopmentMember", 12.40),
+        )
+    ]
+    rows = [dict(r, ticker="JPM") for r in rows]
+    out = panel.build_panel(frame(rows))
+    assert out["loans_cre_total"][0] == pytest.approx(177.94)
+
+
+def test_a_single_class_is_not_promoted_to_the_cre_total() -> None:
+    """One class is a part of the book, not a partition of it.
+
+    Zions tags construction alone at $18m against a $57bn book; calling that
+    its commercial real estate reports a 0.0% CRE share for one of the most
+    CRE-concentrated banks in the panel.
+    """
+    rows = [
+        fact(
+            ticker="ZION",
+            period=dt.date(2023, 6, 30),
+            value=0.018,
+            loan_class="ConstructionLoansMember",
+            dim_axes=CLS,
+            n_dims=1,
+        )
+    ]
+    out = panel.build_panel(frame(rows))
+    assert out["loans_construction"][0] == pytest.approx(0.018)
+    # Absent entirely, or present and null: either way it is not claiming that
+    # Zions' commercial real estate book is $18m.
+    assert "loans_cre_total" not in out.columns or out["loans_cre_total"][0] is None
+
+
+def test_a_tagged_cre_total_is_never_overwritten() -> None:
+    rows = [
+        fact(period=dt.date(2024, 3, 31), value=v, loan_class=m, dim_axes=CLS, n_dims=1)
+        for m, v in (
+            ("CommercialRealEstateMember", 500.0),
+            ("MultifamilyMember", 100.0),
+            ("ConstructionLoansMember", 50.0),
+        )
+    ]
+    out = panel.build_panel(frame(rows))
+    assert out["loans_cre_total"][0] == pytest.approx(500.0)
+
+
+# ---- the HTML fallback's own label traps --------------------------------
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        # Each of these was read as the concept it negates, from one JPMorgan
+        # 10-K: the card book, criticized loans, and the provision.
+        "total consumer, excluding credit card loans",
+        "noncriticized",
+        "pre-provision profit",
+    ],
+)
+def test_a_label_that_negates_a_concept_is_not_read_as_it(label: str) -> None:
+    assert html_fallback.EXCLUDE_LABEL.search(label)
+
+
+def test_net_charge_offs_are_not_read_as_gross() -> None:
+    """Row patterns are first-match-wins and "net charge-offs" contains
+    "charge-offs", so the net rule has to be listed first or it is
+    unreachable -- the same net/gross trap as the element split."""
+    spec = next(s for s in html_fallback.SPECS if s.name == "acl_rollforward")
+    keys = list(spec.row_map)
+    assert keys.index(r"net charge.?offs") < keys.index(
+        r"gross charge.?offs|charge.?offs"
+    )
+    matched = next(
+        var
+        for pattern, var in spec.row_map.items()
+        if __import__("re").search(pattern, "net charge-offs", __import__("re").I)
+    )
+    assert matched == "nco"

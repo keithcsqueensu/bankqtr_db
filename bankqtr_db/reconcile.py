@@ -153,6 +153,7 @@ def reconcile(
         return out
 
     wide = _widen(resolved)
+    wide = _reject_partial_book(panel, wide)
     incoming = [c for c in wide.columns if c not in ("ticker", "period")]
     wide = _reject_implausible(panel, wide, incoming)
     return fill_gaps(out, wide, source="html", allow_new=HTML_NEW_COLUMNS)
@@ -331,6 +332,53 @@ def merge_ir(
     return fill_gaps(panel, wide, source="ir_supplement")
 
 
+# How far a parsed table's own total may sit from the tagged one before its
+# rows are read as covering a different population.
+_PARTIAL_BOOK_TOLERANCE = 0.2
+
+
+def _reject_partial_book(panel: pl.DataFrame, wide: pl.DataFrame) -> pl.DataFrame:
+    """Drop parsed loan rows whose own total disagrees with the tagged one.
+
+    ``classify_table`` finds a table by its row labels, and a bank can have
+    several that answer to the same labels for different populations.
+    JPMorgan's FY2025 10-K has one for wholesale alone: it carries "commercial
+    and industrial", "residential real estate" and "total loans", so it
+    classifies as the loan portfolio, but its total is $369bn against a tagged
+    book of $1,409bn.  Its rows are real numbers about a quarter of the bank,
+    and filling whole-bank mix columns from them puts a wholesale figure in a
+    consolidated column.
+
+    The table states its own total, so it can be asked.  Where that total and
+    the tagged one disagree, every ``loans_*`` reading from that bank-quarter
+    goes -- the disagreement says the two are not measuring the same book, and
+    which rows are affected cannot be known from the labels alone.
+    """
+    if "loans_total" not in panel.columns or "loans_total" not in wide.columns:
+        return wide
+    loan_cols = [c for c in wide.columns if c.startswith("loans_")]
+    if not loan_cols:
+        return wide
+
+    book = panel.select(
+        "ticker", "period", pl.col("loans_total").alias("_book")
+    ).unique(subset=["ticker", "period"], keep="first")
+    parsed = pl.col("loans_total")
+    disagrees = (
+        pl.col("_book").is_not_null()
+        & (pl.col("_book").abs() > 0)
+        & parsed.is_not_null()
+        & ((parsed - pl.col("_book")).abs() > pl.col("_book").abs() * _PARTIAL_BOOK_TOLERANCE)
+    )
+    return (
+        wide.join(book, on=["ticker", "period"], how="left")
+        .with_columns(
+            [pl.when(disagrees).then(None).otherwise(pl.col(c)).alias(c) for c in loan_cols]
+        )
+        .drop("_book")
+    )
+
+
 # Slice of the loan book, so it cannot exceed the loan book.  ``loans_total``
 # is excluded because it *is* the book.
 _SUBSET_OF_LOANS = ("loans_", "acl_", "nonaccrual_", "cq_", "pd_")
@@ -433,7 +481,7 @@ def refresh_ratios(panel: pl.DataFrame) -> pl.DataFrame:
             .alias(source),
             pl.col(ratio.name).fill_null(value).alias(ratio.name),
         )
-    return panel_mod.with_mix_coverage(out)
+    return panel_mod.with_mix_coverage(panel_mod.with_cre_rollup(out))
 
 
 # --------------------------------------------------------------------------

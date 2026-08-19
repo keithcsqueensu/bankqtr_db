@@ -415,9 +415,7 @@ def _pick_best(df: pl.DataFrame, var: VarDef, key: list[str]) -> pl.DataFrame:
 ROLLUP_TOLERANCE = 0.001
 
 
-def _sum_partition(
-    df: pl.DataFrame, key: list[str], out_name: str
-) -> pl.DataFrame:
+def _sum_partition(df: pl.DataFrame, key: list[str], out_name: str) -> pl.DataFrame:
     """Sum one signature's members, dropping any rollup that contains others.
 
     A signature is one disclosure table, and its members usually partition the
@@ -842,6 +840,55 @@ MIX_LEAF_CATEGORIES: tuple[str, ...] = (
 )
 
 
+# The CRE classes a bank may break out instead of tagging a CRE total.
+CRE_COMPONENTS: tuple[str, ...] = (
+    "cre_investor",
+    "cre_owner_occupied",
+    "multifamily",
+    "construction",
+)
+
+
+def with_cre_rollup(df: pl.DataFrame) -> pl.DataFrame:
+    """Fill ``loans_cre_total`` from its own classes where no total is tagged.
+
+    JPMorgan is the case the README calls out as legitimately null, and it is
+    only half true: it tags no commercial-real-estate *rollup* member, but it
+    does tag multifamily, commercial lessors and construction and development,
+    which at 2025Q4 come to $178bn.  The CRE book was in the panel all along,
+    spread across three columns, while ``cre_total`` -- the one the ratio and
+    the coherence metric read -- stayed empty.
+
+    Only nulls are written, so a bank that tags its own total keeps it, and
+    only the components are summed, never a mix of total and components.
+
+    **Two components at least.**  One is not a partition of the CRE book, it
+    is a part of it, and promoting it to the total asserts that every other
+    class is zero.  Zions tags construction alone, at $18-25m against a $57bn
+    book, and calling that its commercial real estate reported a CRE share of
+    0.0% for one of the most CRE-concentrated banks in the panel.  Left null it
+    is honestly missing instead.
+    """
+    parts = [f"loans_{c}" for c in CRE_COMPONENTS if f"loans_{c}" in df.columns]
+    if len(parts) < 2:
+        return df
+    if "loans_cre_total" not in df.columns:
+        # A bank that tags no CRE rollup has no such column until one is made.
+        # It exists in a universe run only because some *other* bank tags it,
+        # so without this a --tickers JPM build silently skips the rollup.
+        df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("loans_cre_total"))
+    summed = pl.sum_horizontal([pl.col(c).fill_null(0.0) for c in parts])
+    n_parts = pl.sum_horizontal([pl.col(c).is_not_null().cast(pl.Int32) for c in parts])
+    return df.with_columns(
+        pl.when(
+            pl.col("loans_cre_total").is_null() & (n_parts >= 2) & (summed.abs() > 0)
+        )
+        .then(summed)
+        .otherwise(pl.col("loans_cre_total"))
+        .alias("loans_cre_total")
+    )
+
+
 def with_mix_coverage(df: pl.DataFrame) -> pl.DataFrame:
     """(Re)compute ``mix_coverage_pct``: leaf categories over reported loans.
 
@@ -902,6 +949,7 @@ def add_derived(df: pl.DataFrame) -> pl.DataFrame:
     # total the disjoint leaf categories actually account for: near 100 means
     # the mix is coherent, well above 100 means categories overlap, well below
     # means the breakdown is partial.  Filter on it before ranking peers.
+    df = with_cre_rollup(df)
     df = with_mix_coverage(df)
     if "mix_coverage_pct" in df.columns:
         have.add("mix_coverage_pct")
