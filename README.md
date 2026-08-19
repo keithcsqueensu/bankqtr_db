@@ -16,6 +16,24 @@ uv run python scripts/fetch_ir.py --since 2020-01-01       # IR supplements
 uv run python scripts/build_panel.py --since 2020-01-01 --html-fallback --ir
 ```
 
+The XBRL half of the panel reaches back to **2013**. The HTML and IR fallbacks
+do not — both were written against post-2020 layouts — so hold them at 2020
+even when the XBRL window is wider:
+
+```bash
+uv run python scripts/fetch_instances.py --since 2013-01-01     # ~1,670 docs, 670 MB
+uv run python scripts/build_panel.py --since 2013-01-01     --html-fallback --html-since 2020-01-01 --ir
+```
+
+See [docs/extending-to-2013.md](docs/extending-to-2013.md) for what the pre-CECL
+dialect required and what it changed, and *Reading across 2020Q1* below before
+using the longer window.
+
+A full 2013-start build takes a few minutes: instance, IR and filing-HTML
+parsing all run across cores, while every download stays serial behind the one
+rate limiter in `edgar.py`. Output is byte-identical either way — set
+`BANKQTR_WORKERS=1` to force the serial path if you ever need to check that.
+
 Outputs land in `data/out/`:
 
 | File | Contents |
@@ -25,6 +43,7 @@ Outputs land in `data/out/`:
 | `panel_coverage.csv` | per bank and variable: how many quarters are populated |
 | `panel_gaps.csv` | variables ranked by how many banks lack them |
 | `panel_flags.csv` | bank-quarters failing a sanity check |
+| `panel_build_info.json` | the window, settings, commit and cell-provenance counts of the build |
 
 ## The one thing to know first
 
@@ -82,6 +101,41 @@ Firms that stopped filing mid-window (Discover, acquired 2025; MUFG Americas,
 2021) carry a `last_filing` date so "no disclosure" stays distinguishable from
 "no longer exists".
 
+**On the 2013 start, the universe is survivors-only.** It is today's DFAST
+list, and the 2013-2019 peer group also held SunTrust, BBVA USA, CIT, SVB,
+First Republic, Signature, People's United, E\*TRADE, MB Financial and TCF.
+Adding them is a separate decision — new `inactive` entries with a
+`last_filing` — not part of the back-extension. Any cross-sectional statistic
+computed over the early years is conditioned on surviving to 2026.
+
+Two discontinuities *inside* the existing universe matter more than they look,
+because the ticker does not change when the company does:
+
+- **`TFC`'s CIK is BB&T's.** Everything before 2019Q4 is BB&T standalone; the
+  SunTrust merger lands in 2019Q4 and roughly doubles the balance sheet.
+- **`FCNCA`** excludes CIT before 2022 and SVB before 2023.
+
+Both read as growth in a time series and are not.
+
+## Reading across 2020Q1
+
+The panel spans two accounting regimes, and every row says which one it is on
+in the **`basis`** column: `incurred` before CECL adoption, `cecl` from it.
+
+This is not cosmetic. Under CECL the allowance is a lifetime expected-loss
+estimate; before 2020Q1 it is an incurred-loss reserve, and the level step
+between them shows up in `reserve_coverage` and `reserve_to_nonaccrual` as a
+jump that looks exactly like a credit event. `acl`, `provision` and the two
+reserve ratios all change meaning at that line; the move from recorded
+investment to amortised cost shifts loan and nonaccrual levels slightly too.
+
+The panel splices the two anyway — one continuous series is what a user wants —
+but says where the seam is so it can be seen, filtered on, or controlled for.
+Adoption dates live in `config.CECL_ADOPTION`: 2020-01-01 for every filer here
+except Raymond James, whose September fiscal year puts its first CECL quarter
+at 2020Q4. That is the standard large-filer effective date rather than a
+per-filer confirmation from each 10-K.
+
 ## Why the panel logic is not a groupby
 
 Four hazards, each of which silently produces plausible wrong numbers. All four
@@ -127,6 +181,17 @@ the disjoint leaf categories over reported total loans:
 - ≪100 — the breakdown is partial
 
 Filter on it before ranking peers. It is also a quality flag (`mix_incoherent`).
+
+**≈100 is necessary, not sufficient.** The metric is gameable by a single
+mis-mapped rollup, and was being gamed: `TotalLoansandLeasesMember` — the grand
+total — matched the lease rule, so Citizens' entire $93bn book was counted as
+its lease line and `mix_coverage_pct` read a flawless 101.3%. M&T's commercial
+rollup did the same at $27bn against a real lease book near $2bn, for a
+flawless 100.6%. Both are fixed, and both now read honestly low (0 and 72)
+because the rest of those breakdowns genuinely is not mapped. When one member
+absorbs the whole book, the leaves sum to the total by construction — so treat
+a suspiciously perfect score on a bank with few populated categories as a
+reason to look at `panel_unmapped_members.csv`, not as a clean bill of health.
 In practice the incoherent rows concentrate in the custody, broker and specialty
 names (BNY Mellon, Morgan Stanley, Schwab, Santander USA), whose loan disclosures
 are small and irregularly structured; the regional and universal banks that
@@ -419,3 +484,11 @@ still renders.
 - **Unmapped members**: `taxonomy.unmapped()` reports dimension members seen but
   not mapped. An unmapped member means a bank's disclosure is silently missing
   from the panel, so the build prints the count on every run.
+- **An older filing era**: element *and* axis names both changed in the 2018
+  taxonomy, and both are handled the same way — append the legacy name to the
+  tuple in `variables.py` or `instance.PROMOTED_AXES`, never prepend. Ranking
+  is by position for tags, and by `panel.MODERN_LOAN_AXES` for axes, so a
+  legacy name is reached only where a filing carries nothing else. Getting that
+  backwards rewrites the modern panel rather than extending it;
+  `docs/extending-to-2013.md` records what happened when the axis half of that
+  rule was missing.
