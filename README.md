@@ -1,8 +1,20 @@
-# bankqtr_db — DFAST bank peer benchmarking from SEC EDGAR
+# bankqtr_db — DFAST bank peer benchmarking
 
-A bank-quarter panel database for peer benchmarking, built from SEC EDGAR
-filings. One row per bank-quarter, columns per variable, with provenance and
-coverage reporting attached.
+Bank-quarter panel databases for peer benchmarking, built **twice from two
+independent sources**. One row per bank-quarter, columns per variable, with
+provenance and coverage reporting attached.
+
+| Package | Source | Entity | Output |
+|---|---|---|---|
+| `bankqtr_db` | SEC EDGAR — XBRL, filing HTML, IR supplements | the holding company, as it reports itself | `panel.parquet` |
+| `callrpt_db` | FFIEC — CDR bulk Call Reports, NIC structure data | its bank charters, summed | `call_panel.parquet` |
+
+They are not redundant. The EDGAR panel is what the market sees and covers the
+whole consolidated firm; the FFIEC panel is a regulatory filing on a fixed
+form, so its categories cross-foot, it reaches back to 2001, and it covers the
+seven US intermediate holding companies of foreign banks that file no 10-K at
+all. Where the two disagree, `source_diff.csv` says by how much and whether the
+gap is stable — see [FFIEC Call Reports](#second-source-ffiec-call-reports).
 
 ## Quick start
 
@@ -14,6 +26,14 @@ uv run python scripts/fetch_facts.py            # companyfacts + submissions
 uv run python scripts/fetch_instances.py --since 2020-01-01
 uv run python scripts/fetch_ir.py --since 2020-01-01       # IR supplements
 uv run python scripts/build_panel.py --since 2020-01-01 --html-fallback --ir
+```
+
+The FFIEC build is independent and can be run on its own; it needs no EDGAR
+data except the cached submissions the RSSD resolver reads EINs from:
+
+```bash
+uv run python scripts/fetch_call.py --since 2013-01-01
+uv run python scripts/build_call_panel.py --since 2013-01-01
 ```
 
 The XBRL half of the panel reaches back to **2013**. The HTML and IR fallbacks
@@ -66,6 +86,8 @@ Both return the same long schema; `source` records which path a fact came from.
 
 ## Pipeline
 
+The EDGAR side; the FFIEC side has [its own](#pipeline-1).
+
 ```
 filings.py     10-K/10-Q index per bank (submissions API, incl. overflow shards)
 edgar.py       rate-limited, gzip-cached HTTP
@@ -94,8 +116,12 @@ Ten additional non-DFAST regional comparators are available behind
 BMO Financial Corp, TD Group US Holdings, UBS Americas, DB USA, Barclays US,
 RBC US Group, BNP Paribas USA — file no 10-K at all; they report only on
 FR Y-9C. They are listed in `config.NON_SEC_IHCS` so the absence is explicit
-rather than an unexplained hole. Closing that gap needs FFIEC/NIC call-report
-data, which is a different source and a separate build.
+rather than an unexplained hole. **That gap is now closed by `callrpt_db`**,
+which reads their bank subsidiaries' Call Reports — see
+[FFIEC Call Reports](#second-source-ffiec-call-reports). Seven of the eight are
+in that panel, with 305 bank-quarters between them; Credit Suisse Holdings
+(USA) is the exception, and genuinely so, since its US intermediate holding
+company owned a broker-dealer rather than a Call-Report-filing bank.
 
 Firms that stopped filing mid-window (Discover, acquired 2025; MUFG Americas,
 2021) carry a `last_filing` date so "no disclosure" stays distinguishable from
@@ -447,6 +473,255 @@ null — an already-computed ratio is never disturbed — and the coherence metr
 is deliberately left alone rather than recomputed from a duplicated copy of the
 leaf-category list.
 
+## Second source: FFIEC Call Reports
+
+`callrpt_db` builds the same panel from the **Call Report** (FFIEC 031/041/051),
+the quarterly regulatory filing every insured US bank makes. It is a different
+source in every respect that matters: a different regulator, a different entity,
+a fixed form rather than a disclosure choice, and — because the form states its
+own totals — numbers that can be *checked* rather than merely believed.
+
+```bash
+export BANKQTR_UA="you@yourdomain.com"
+
+uv run python scripts/fetch_call.py --since 2013-01-01      # ~350 MB, 54 quarters
+uv run python scripts/resolve_rssd.py --write-config        # bank -> RSSD, once
+uv run python scripts/build_call_panel.py --since 2013-01-01
+```
+
+Fetching and building are separate on the same terms as the EDGAR side:
+`build_call_panel.py` reads only what is cached and never touches the network.
+
+Outputs land in `data/out/`:
+
+| File | Contents |
+|---|---|
+| `call_panel.parquet` / `.csv` | the holding-company panel — 1,929 bank-quarters, 38 firms, 2013Q1–2026Q2 |
+| `call_panel_charters.parquet` | one row per **bank charter** per quarter — 3,849 rows, 103 charters |
+| `call_panel_coverage.csv` | per bank and variable: how many quarters are populated |
+| `call_panel_flags.csv` | bank-quarters failing a sanity check |
+| `call_panel_build_info.json` | the window, settings, commit and cell counts |
+| `rssd_resolution.csv` | how each firm was matched to its RSSD, with the evidence |
+| `source_diff.csv` | EDGAR against FFIEC, per bank-quarter per variable |
+| `source_diff_summary.csv` | the same, aggregated per bank and variable |
+| `source_coverage.csv` | which firms each source reaches |
+
+### What it buys
+
+**The IHCs that EDGAR cannot reach.** This is the headline. Seven of the eight
+firms in `config.NON_SEC_IHCS` are now in a panel, on the same schema as their
+SEC-filing peers:
+
+| | Loans, 2026Q2 | Quarters | From |
+|---|---:|---:|---|
+| TD Group US Holdings | $173.7bn | 54 | 2013Q1 |
+| BMO Financial Corp | $141.6bn | 54 | 2013Q1 |
+| UBS Americas Holding | $93.1bn | 44 | 2015Q3 |
+| RBC US Group Holdings | $73.5bn | 33 | 2018Q2 |
+| BNP Paribas USA | $60.1bn | 26 | 2016Q3 (last 2022Q4) |
+| Barclays US | $29.2bn | 40 | 2016Q3 |
+| DB USA Corporation | $15.5bn | 54 | 2013Q1 |
+
+The windows differ because the IHC structure itself did: the Federal Reserve's
+IHC requirement bit in mid-2016, and RBC's US bank arrived with the City
+National acquisition. Credit Suisse Holdings (USA) is absent and correctly so —
+its US intermediate holding company owned a broker-dealer, not a bank that files
+a Call Report.
+
+**A portfolio mix that cross-foots.** Schedule RC-C is a partition of a total
+the schedule itself states, so `mix_coverage_pct` is not an estimate of
+coherence — it is an arithmetic identity, and a departure from 100 is a
+measurable quantity of loans in no category rather than a warning that
+categories may overlap.
+
+| | median `mix_coverage_pct` | 5th percentile |
+|---|---:|---:|
+| `bankqtr_db` (XBRL) | 90.0 | — |
+| `callrpt_db` (Call Report) | **100.0** | 93.0 |
+
+Across 3,849 charter-quarters the leaves tie to RC-C's own total **exactly** in
+3,280 of them. Not one of the remainder is an over-count; every one is
+under-allocation, and it has a single cause described under *What it does not
+buy* below.
+
+**Owner-occupied against investor CRE, for everyone.** The EDGAR panel calls
+this split "partial" because it depends on the bank breaking it out. Items F160
+and F161 are fixed lines on the form, so every filer reports both, every
+quarter.
+
+**Capital.** CET1, tier 1, total capital and risk-weighted assets come off
+Schedule RC-R. The XBRL path has no dependable tags for these and the EDGAR
+panel carries none. Populated from 2015 onward — Basel III restructured RC-R
+Part I that year, and the 2013–2014 quarters report a different set of items,
+so those 263 bank-quarters are null rather than approximated from the old ones.
+
+**Depth.** CDR offers 102 quarters back to 2001Q1 — a full credit cycle,
+including 2008, which the 2013-start EDGAR panel does not reach. The build is
+capped at 2013 only to match it; `--since 2001-01-01` works.
+
+### What it does not buy
+
+**It is not the same company.** A Call Report is filed by a *bank*. The panel
+sums the depository charters under each holding company using the NIC control
+graph, and that rollup excludes the broker-dealer, the credit-card funding
+trusts, the insurance arms and every non-bank lender. Both directions of
+divergence follow, and both are real here:
+
+| | `loans_total`, FFIEC ÷ EDGAR |
+|---|---:|
+| Ameriprise | 0.19 |
+| Santander USA | 0.65 |
+| BNY Mellon | 0.76 |
+| Goldman Sachs | 0.85 |
+| median across 31 firms | **1.00** |
+| Bank of America | 1.00 (87% of quarters agree within 0.5%) |
+
+Ameriprise at 0.19 is not a defect: almost all of its lending happens outside
+Ameriprise Bank. Ratios above 1.00 are intercompany — a loan from the bank to
+its own broker-dealer is an asset on the Call Report and is eliminated in the
+holding company's consolidation. Every holding-company row carries `n_charters`
+and `charters` so a reader can see exactly what was summed.
+
+**The categories are the form's, not the filing's.** `loans_ci` runs about 0.80
+of the 10-K's C&I line and `loans_cre_total` about 1.11 of its CRE line, and
+neither is wrong. RC-C puts loans to nondepository financial institutions and
+municipal obligations on their own lines, where a 10-K usually folds them into
+C&I; and RC-C's CRE includes owner-occupied, which many 10-Ks exclude. Use one
+source or the other for a mix comparison — not a mixture of the two.
+
+**Some loans are in no category, and only on form 031.** Items 1545 (securities
+lending), 2165 (leases), J451 and J454 are collected in the *domestic-office*
+column while the total is consolidated, so a bank with foreign offices has
+exposure the form never breaks out abroad. BNY Mellon at 2017Q3 is the clearest
+case: $29.5bn consolidated against $15.6bn domestic, with $4.9bn of the
+difference belonging to lines that have no foreign column to sit in. This is
+reported, not hidden — as `loans_unallocated` in dollars, as `rcc_residual_pct`
+as a share, and as the `rcc_partition_under` flag, which fires on 552 of 1,929
+bank-quarters and is the only flag the build raises.
+
+**Office CRE and leveraged lending are not here either.** The Call Report has no
+property-type breakdown. Those remain IR-supplement territory, and the EDGAR
+build is the one that reaches them.
+
+### Pipeline
+
+```
+cdr.py         CDR bulk download (an ASP.NET form, not an API), cached per quarter
+nic.py         NIC entity graph: who owns whom, dated; EIN bridge to EDGAR
+mdrm.py        MDRM item codes -> panel variables, with the partition checks
+schedules.py   bulk TSV -> long frame -> one column per variable
+panel.py       long -> charter panel -> holding-company panel, ratios, checks
+crosscheck.py  EDGAR against FFIEC: agreement, stability, coverage gained
+```
+
+### The traps
+
+Each of these produced plausible, non-raising, wrong numbers, and each has a
+test in `tests/test_callrpt.py`.
+
+- **The prefix is a reporting basis.** `RCFD` is the consolidated bank, `RCON`
+  is domestic offices only. Preferring `RCON` reads JPMorgan's loan book as
+  $1,340bn instead of $1,497bn — an 11% understatement that looks entirely
+  plausible next to its peers. Insisting on `RCFD` instead drops Zions, which
+  files no `RCFD` at all. And the preference is **per item, not per schedule**:
+  Schedule RC-N reports its totals on `RCFD` and its entire real-estate
+  breakdown on `RCON`, in the same filing, for the same bank.
+- **There are two "total loans".** RC-C item 12 includes loans held for sale;
+  RC item 4.b does not. The EDGAR panel's `loans_total` is held-for-investment,
+  so `B528` is the comparable one — and `B528 + 5369 == 2122` holds to the
+  dollar on every filer checked, which is how the two were told apart.
+- **Rollups sit beside their own components.** A filer can report the coarse
+  line *and* the detail it totals. Morgan Stanley Bank reports item 1563 next to
+  the J454, J451 and 1545 that sum to it exactly; counting both put its loan
+  book 62% over its own reported total. Another filer does the same with J464.
+  And `1563` is not `J464` — 1563 covers the whole of RC-C item 9 including
+  loans to nondepository financial institutions, while J464 covers only item
+  9.b.
+- **…and the detail can be zeros.** The mirror-image trap. Zions reports the
+  five-way interbank split as explicit zeros next to the single line 1288 that
+  carries the real $59m, so "prefer the detail where present" reads its
+  interbank book as nothing. Variants are therefore chosen by **how completely
+  the filer reported them**, with ties going to the coarser line.
+- **Which shape a filer uses is not a function of the form.** Keying the choice
+  on 031/041/051 got 5,368 of 6,974 filers wrong in 2013Q1, because a small 041
+  filer before 2017 collapses C&I into 1766 and leases into 2165 exactly as the
+  short form does — the short form did not exist yet.
+- **Item 12 subtracts item 11.** Unearned income is deducted from the loan
+  total. Almost every filer reports zero there, which is why omitting it went
+  unnoticed until City National Bank, whose $562m put it 0.86% over its own
+  total in every quarter with nothing else wrong.
+- **Every flow is year-to-date.** JPMorgan's charge-offs run 730 → 3,346 →
+  5,022 → 6,810 through 2019 and reset at 1,902 in 2020Q1. Unlike the XBRL
+  panel, where cumulative-only tagging is one bank's quirk, this is how *every*
+  `RIAD` item behaves for *every* bank. Quarters are recovered by differencing,
+  **per charter and before the rollup** — otherwise a holding company that
+  acquires a bank mid-year books that bank's whole year to date as one quarter.
+- **The second row is not data.** Each bulk file has MDRM codes on row 1 and
+  human labels on row 2. A reader that starts at row 2 gains an institution
+  whose every field is a caption.
+- **`CONF` is not zero.** A withheld line read as zero reports a bank's
+  confidential exposure as an absence of exposure.
+- **The relationship graph is dated.** `DT_END = 99991231` means open; anything
+  else closed. Reading the graph as current puts SunTrust Bank under Truist in
+  2014. Every quarter resolves its charter set against the graph as it stood
+  then.
+- **The EIN join has a leading zero.** NIC stores `ID_TAX` as a number and drops
+  it; EDGAR keeps it. Joining the raw strings misses Citizens Financial Group
+  (`050412693` against `50412693`), State Street and Santander USA — and
+  Citizens then fell through to a name match, where there is an *unrelated*
+  active bank holding company also called Citizens Financial Group, Inc.
+
+### Identity: which RSSD is which bank
+
+NIC carries no CIK, so `scripts/resolve_rssd.py` bridges on **EIN** — a federal
+tax identifier both registries collect independently from the filer — rather
+than on company name. Names are used only for the IHCs, which have no SEC
+registration to carry an EIN. Every match is written to `rssd_resolution.csv`
+with the evidence that produced it, so a name match is visibly weaker than a tax
+match rather than indistinguishable from one.
+
+Two refinements were needed and both came from the data:
+
+- **Candidates are ranked by whether they own a bank.** Three distinct *active*
+  holding companies are called some form of "Citizens Financial", one of them a
+  $220bn DFAST participant and another the owner of a single bank in West
+  Virginia. Comerica, Valley National and Synovus each have a plausibly-named
+  sibling entity with no charter under it. Having a Call Report filer underneath
+  is the only criterion that tests what the panel actually needs.
+- **A firm is not one RSSD for all time.** Zions Bancorporation merged its
+  holding company into its own bank in 2018: RSSD 1027004 until then, 276579
+  after, with a different EIN and no parent. `Holding.also_rssd` carries the
+  other era, and the quarter's filers are the union — seven charters before the
+  merger, one after.
+
+### Testing
+
+```bash
+uv run pytest tests/test_callrpt.py -q
+```
+
+35 tests. The unit tests build a bulk file in memory with the real row shape, so
+they run without `data/raw/call`; the two integration tests are skipped when no
+quarter is cached. The strongest is `test_partition_ties_for_a_real_quarter`,
+which asserts across every one of the ~4,300 filers in the latest quarter that
+the loan categories never sum to *more* than RC-C's own total — under-allocation
+is the form, over-allocation is always a mapping defect, and every trap listed
+above showed up there first.
+
+### Extending
+
+- **New variable**: add an `ItemSpec` in `mdrm.py`. Give it `alternatives` if
+  some filers report a coarser line instead, and `prefixes` if it is not an
+  ordinary balance-sheet item.
+- **New partition check**: add a `PartitionCheck`. Any schedule stating its own
+  total can be cross-footed the way RC-C is.
+- **New bank**: add it to `bankqtr_db/config.py` and rerun
+  `scripts/resolve_rssd.py --write-config`; the RSSD, the charter set and the
+  evidence are all derived.
+- **An older era**: `--since 2001-01-01`. Expect the pre-2009 forms to need more
+  `alternatives` — the partition check will say exactly which items are missing
+  and for how many filers.
+
 ## HTML fallback
 
 `pandas.read_html` over the primary document, with tables located by matching
@@ -468,9 +743,10 @@ uv run pytest tests/ -q
 uv run ruff check .
 ```
 
-Every test corresponds to a defect that produced plausible but wrong numbers
-during development — the dangerous kind, since nothing raises and the panel
-still renders.
+218 tests across both builds. Every one corresponds to a defect that produced
+plausible but wrong numbers during development — the dangerous kind, since
+nothing raises and the panel still renders. `tests/test_callrpt.py` covers the
+FFIEC path and needs no cached data for all but two of its cases.
 
 ## Extending
 
