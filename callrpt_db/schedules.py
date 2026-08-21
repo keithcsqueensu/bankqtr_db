@@ -36,6 +36,12 @@ from . import cdr, mdrm
 
 log = logging.getLogger(__name__)
 
+# The narrative schedule in some mid-2000s files carries a single field longer
+# than the csv module's default limit, and the reader raises rather than
+# truncating.  Those files are never wanted, but the limit is lifted so that a
+# caller asking for every schedule still gets an answer.
+csv.field_size_limit(2**31 - 1)
+
 # The roster file: every institution that filed for the period.
 POR_MARKER = "Bulk POR"
 _SCHEDULE_RE = re.compile(r"Call Schedule ([A-Z0-9]+) \d{8}")
@@ -167,7 +173,10 @@ def read_period(
                 continue
             schedule = m.group(1)
             keep = wanted.get(schedule)
-            if keep is not None and not keep:
+            # A schedule the mapping does not mention is skipped outright.  It
+            # used to be read in full, which cost a minute per quarter and, in
+            # 2006Q4, a crash on the narrative schedule's text fields.
+            if keep is None or not keep:
                 continue
             with _open_text(z, name) as fh:
                 reader = csv.reader(fh, delimiter="\t")
@@ -254,18 +263,32 @@ def resolve_items(
     else:
         base = base.with_columns(pl.lit(None, dtype=pl.Utf8).alias("form"))
 
-    def summed(schedule: str, full_codes: list[str], out: str) -> pl.DataFrame:
+    def summed(schedules: tuple[str, ...], full_codes: list[str], out: str) -> pl.DataFrame:
+        """Sum ``full_codes`` per bank-quarter, reading the listed schedules.
+
+        Where a spec names several schedules, a code that a filing carries in
+        more than one of them is taken from the first listed and never added
+        twice: item 2170 sits on RC and is repeated on the old RC-R, and
+        goodwill 3163 moved from RC to RC-M in 2018Q2.
+        """
         if not full_codes:
             return pl.DataFrame(
                 schema={"rssd": pl.Int64, "period": pl.Date, out: pl.Float64}
             )
-        return (
-            long.filter(
-                (pl.col("schedule") == schedule) & pl.col("code").is_in(full_codes)
-            )
-            .group_by(key)
-            .agg(pl.col("value").sum().alias(out))
+        hit = long.filter(
+            pl.col("schedule").is_in(list(schedules)) & pl.col("code").is_in(full_codes)
         )
+        if len(schedules) > 1:
+            rank = {s: i for i, s in enumerate(schedules)}
+            hit = (
+                hit.with_columns(
+                    pl.col("schedule").replace_strict(rank, default=len(rank)).alias("_rank")
+                )
+                .sort("_rank")
+                .unique(subset=[*key, "code"], keep="first")
+                .drop("_rank")
+            )
+        return hit.group_by(key).agg(pl.col("value").sum().alias(out))
 
     def by_prefix(
         spec: mdrm.ItemSpec, items: tuple[str, ...], column: str
@@ -287,7 +310,7 @@ def resolve_items(
             per_item: pl.DataFrame | None = None
             name = f"__item_{item}"
             for prefix in spec.prefixes:
-                hit = summed(spec.schedule, [prefix + item], name)
+                hit = summed(spec.schedules, [prefix + item], name)
                 if hit.is_empty():
                     continue
                 per_item = hit if per_item is None else _fill_missing(per_item, hit, name)
@@ -335,21 +358,30 @@ def resolve_items(
         # J454's $7bn and dropped the $16bn beside it.  Ties favour the coarse
         # variant because a rollup is the total of its own detail, which is why
         # Zions' 1288 beats the five zeros it sits next to.
-        best = pl.max_horizontal([pl.col(n) for _, n in parts])
+        #
+        # A spec may instead ask for the *first* variant with anything present
+        # (``prefer="first"``): its variants are successive definitions of the
+        # same total rather than levels of detail, and the older definition's
+        # lines can outlive the newer total on the form.
         value = pl.lit(None, dtype=pl.Float64)
-        for column, count in reversed(parts):
-            value = (
-                pl.when((pl.col(count) == best) & (pl.col(count) > 0))
-                .then(pl.col(column))
-                .otherwise(value)
-            )
+        if spec.prefer == "first":
+            for column, count in reversed(parts):
+                value = pl.when(pl.col(count) > 0).then(pl.col(column)).otherwise(value)
+        else:
+            best = pl.max_horizontal([pl.col(n) for _, n in parts])
+            for column, count in reversed(parts):
+                value = (
+                    pl.when((pl.col(count) == best) & (pl.col(count) > 0))
+                    .then(pl.col(column))
+                    .otherwise(value)
+                )
         resolved = holder.with_columns(value.alias(spec.name)).select([*key, spec.name])
 
         # ``plus`` adds a second basis rather than choosing between bases:
         # deposits are domestic (RCON2200) *plus* foreign (RCFN2200), and a
         # bank with no foreign offices simply contributes nothing here.
         for prefix, items in spec.plus:
-            extra = summed(spec.schedule, [prefix + item for item in items], "_extra")
+            extra = summed(spec.schedules, [prefix + item for item in items], "_extra")
             if extra.is_empty():
                 continue
             resolved = (

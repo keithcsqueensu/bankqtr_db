@@ -1,8 +1,21 @@
-"""FFIEC NIC structure data: the entity graph, and the bridge to EDGAR.
+"""FFIEC NIC structure data: the entity graph, succession, and the bridge to EDGAR.
 
-Three bulk files at ``ffiec.gov/npw`` describe who exists and who owns whom:
-``attributes-active``, ``attributes-closed`` and ``relationships``.  Together
-they answer the only two questions this package asks of NIC.
+Four bulk files at ``ffiec.gov/npw`` describe who exists, who owns whom, and
+who became whom: ``attributes-active``, ``attributes-closed``,
+``relationships`` and ``transformations``.  Together they answer the three
+questions this package asks of NIC.
+
+**Which entity became which.**  The transformations table records every
+event in which one entity's assets passed to another: a merger, a failure
+resolved by the FDIC, a charter re-issued under a new RSSD.  It is what lets
+the panel follow Wachovia into Wells Fargo, National City into PNC and
+Washington Mutual into JPMorgan Chase -- see :mod:`callrpt_db.lineage`.  The
+codes are read off the NIC data dictionary, not guessed: ``1`` is a merger or
+purchase-and-assumption, ``9`` a charter retained under a new RSSD with 95%
+or more of the assets, and ``50`` a failure with government assistance.
+Codes ``5`` and ``7`` are partial -- a split or a sale of 40-94% of the
+assets, after which the predecessor continues to exist -- and are not
+succession in any sense a panel can sum.
 
 **Which charter belongs to which parent.**  A Call Report is filed by a bank,
 not by a holding company, so rolling up to something comparable with a 10-K
@@ -113,12 +126,34 @@ class Entity:
     is_bhc: bool
     is_ihc: bool
     active: bool
+    # ``YYYYMMDD`` strings, as the file carries them; ``None`` where NIC has
+    # no date.  ``ended`` is ``None`` for an entity that still exists.
+    opened: str | None = None
+    ended: str | None = None
+    # REASON_TERM_CD: 0 continues, 1 voluntary liquidation, 2 closed after a
+    # merger, 3 no longer regulated, 4 failed but continues, 5 failed and
+    # ceased to exist.  4 and 5 are the failures.
+    reason_term: str = "0"
+
+    @property
+    def failed(self) -> bool:
+        return self.reason_term in FAILURE_TERM_CODES
+
+
+# REASON_TERM_CD values that mean the entity failed, per the NIC dictionary.
+FAILURE_TERM_CODES = frozenset({"4", "5"})
 
 
 def _clean(value: str) -> str | None:
     """NIC writes an absent identifier as ``0``, not as an empty field."""
     v = (value or "").strip()
     return None if v in ("", "0") else v
+
+
+def _stamp(value: str) -> str | None:
+    """A ``YYYYMMDD`` field, or ``None`` where NIC wrote ``0`` or the open end."""
+    v = _clean(value)
+    return None if v is None or v == OPEN_END else v
 
 
 @lru_cache(maxsize=1)
@@ -147,8 +182,110 @@ def entities() -> dict[int, Entity]:
                 is_bhc=row.get("BHC_IND", "0").strip() == "1",
                 is_ihc=row.get("IHC_IND", "0").strip() == "1",
                 active=active,
+                opened=_stamp(row.get("DT_OPEN", "")),
+                ended=_stamp(row.get("DT_END", "")),
+                reason_term=(row.get("REASON_TERM_CD") or "0").strip() or "0",
             )
     return out
+
+
+# --------------------------------------------------------------------------
+# Succession
+# --------------------------------------------------------------------------
+
+# TRNSFM_CD values under which the predecessor's whole balance sheet passed
+# to the successor.  See the module docstring for the partial codes left out.
+ABSORPTION_CODES = frozenset({"1", "9", "50"})
+FAILURE_CODE = "50"
+
+
+@dataclass(frozen=True)
+class Succession:
+    """One predecessor -> successor event from the transformations table."""
+
+    predecessor: int
+    successor: int
+    date: str  # YYYYMMDD
+    code: str  # TRNSFM_CD
+    # ACCT_METHOD 1: pooling of interests / entities under common control.
+    # The survivor's year-to-date income statement is restated as though the
+    # two had been combined from the start of the year, which matters for
+    # differencing flows -- see ``panel.quarterize``.
+    pooled: bool
+
+    @property
+    def failure(self) -> bool:
+        return self.code == FAILURE_CODE
+
+    @property
+    def on(self) -> dt.date:
+        return stamp_to_date(self.date)
+
+
+def stamp_to_date(stamp: str) -> dt.date:
+    """``YYYYMMDD`` -> date.  Raises ``ValueError`` on anything else."""
+    if len(stamp) != 8 or not stamp.isdigit():
+        raise ValueError(f"not a YYYYMMDD stamp: {stamp!r}")
+    return dt.date(int(stamp[:4]), int(stamp[4:6]), int(stamp[6:]))
+
+
+@lru_cache(maxsize=1)
+def successions() -> tuple[Succession, ...]:
+    """Every whole-entity succession NIC records, oldest first.
+
+    Only the absorption codes are kept.  A split (``5``) or a sale of assets
+    (``7``) leaves the predecessor standing, and summing it into the successor
+    would count a bank that still files its own Call Report.
+    """
+    paths = fetch_structure()
+    out: list[Succession] = []
+    for row in _read_csv(paths["transformations"]):
+        code = (row.get("TRNSFM_CD") or "").strip()
+        if code not in ABSORPTION_CODES:
+            continue
+        try:
+            pred = int(row["#ID_RSSD_PREDECESSOR"])
+            succ = int(row["ID_RSSD_SUCCESSOR"])
+        except (KeyError, ValueError):
+            continue
+        date = (row.get("DT_TRANS") or "").strip()
+        if len(date) != 8 or not date.isdigit():
+            continue
+        out.append(
+            Succession(
+                predecessor=pred,
+                successor=succ,
+                date=date,
+                code=code,
+                pooled=(row.get("ACCT_METHOD") or "").strip() == "1",
+            )
+        )
+    out.sort(key=lambda s: (s.date, s.predecessor, s.successor))
+    return tuple(out)
+
+
+@lru_cache(maxsize=1)
+def by_successor() -> dict[int, tuple[Succession, ...]]:
+    """Successor -> the events in which it absorbed something."""
+    grouped: dict[int, list[Succession]] = defaultdict(list)
+    for s in successions():
+        grouped[s.successor].append(s)
+    return {k: tuple(v) for k, v in grouped.items()}
+
+
+@lru_cache(maxsize=1)
+def failed_rssds() -> frozenset[int]:
+    """Every entity that failed, by either of NIC's two independent records.
+
+    The transformations table marks the resolution (``TRNSFM_CD = 50``) and
+    the attributes table marks the termination (``REASON_TERM_CD`` 4 or 5).
+    They agree on every case checked -- Washington Mutual Bank, Colonial Bank,
+    First Republic Bank, Park National Bank -- and the union is taken so that
+    a failure recorded in only one of them is still a failure.
+    """
+    out = {s.predecessor for s in successions() if s.failure}
+    out.update(rssd for rssd, ent in entities().items() if ent.failed)
+    return frozenset(out)
 
 
 @lru_cache(maxsize=1)
@@ -177,6 +314,35 @@ def _relationships() -> list[tuple[int, int, str, str]]:
     return out
 
 
+@lru_cache(maxsize=1)
+def control_parents() -> dict[int, tuple[tuple[int, str, str], ...]]:
+    """Offspring -> every ``(parent, start, end)`` control relationship it has had.
+
+    The dated inverse of :func:`hierarchy`.  It answers when an entity
+    *joined* an organisation, which the transformations table cannot: an
+    acquisition that keeps the acquired company alive as a subsidiary --
+    Countrywide, Merrill Lynch, Bear Stearns, MUFG Americas -- is recorded only
+    here, as a relationship that begins on the closing date.
+    """
+    out: dict[int, list[tuple[int, str, str]]] = defaultdict(list)
+    for parent, child, start, end in _relationships():
+        out[child].append((parent, start, end))
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def parents_on(rssd: int, as_of: dt.date) -> list[int]:
+    """Controlling parents of ``rssd`` as the graph stood on ``as_of``."""
+    stamp = as_of.strftime("%Y%m%d")
+    out: list[int] = []
+    for parent, start, end in control_parents().get(rssd, ()):
+        if start and start > stamp:
+            continue
+        if end < stamp:
+            continue
+        out.append(parent)
+    return out
+
+
 def hierarchy(as_of: dt.date | None = None) -> dict[int, list[int]]:
     """Parent -> direct controlled offspring, as the graph stood on ``as_of``.
 
@@ -184,8 +350,16 @@ def hierarchy(as_of: dt.date | None = None) -> dict[int, list[int]]:
     stands today.  Passing a date is what keeps a historical quarter honest:
     SunTrust Bank was not a Truist subsidiary in 2014, and the undated graph
     says it was.
+
+    Cached per date.  The lineage walk and the universe build both ask for
+    every quarter end in the window, and the answer does not change between
+    the two.  Callers must treat the result as read-only.
     """
-    stamp = None if as_of is None else as_of.strftime("%Y%m%d")
+    return _hierarchy_at(None if as_of is None else as_of.strftime("%Y%m%d"))
+
+
+@lru_cache(maxsize=512)
+def _hierarchy_at(stamp: str | None) -> dict[int, list[int]]:
     kids: dict[int, list[int]] = defaultdict(list)
     for parent, child, start, end in _relationships():
         if stamp is None:

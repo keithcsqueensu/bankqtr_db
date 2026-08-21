@@ -59,6 +59,9 @@ NPW_FILES = {
     "attributes_active": "ReturnAttributesActiveZipFileCSV",
     "attributes_closed": "ReturnAttributesClosedZipFileCSV",
     "relationships": "ReturnRelationshipsZipFileCSV",
+    # Predecessor -> successor events: mergers, failures, re-charterings.
+    # Singular "Transformation" in the endpoint name, plural in the file.
+    "transformations": "ReturnTransformationZipFileCSV",
 }
 
 # One bulk zip is ~6 MB and the server is not a CDN; stay gentle.

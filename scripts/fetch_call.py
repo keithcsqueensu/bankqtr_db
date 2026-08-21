@@ -1,16 +1,19 @@
 """Download FFIEC bulk data into the local cache.
 
+uv run python scripts/fetch_call.py                       # 2001Q1 onward, ~850 MB
 uv run python scripts/fetch_call.py --since 2013-01-01
-uv run python scripts/fetch_call.py --since 2013-01-01 --structure-only
+uv run python scripts/fetch_call.py --structure-only       # NIC files only
 uv run python scripts/fetch_call.py --list-periods
 
 Fetching and building are separate on purpose, exactly as they are for the
 EDGAR side: ``build_call_panel.py`` reads only what is already cached and never
 touches the network, so a rebuild is reproducible.
 
-One quarter is a ~6 MB zip holding every schedule for every filer -- around
-4,400 institutions -- so a 2013-start window is ~350 MB and a few minutes of
-serial downloading behind the one rate limiter in ``cdr.py``.
+One quarter is a 6-9 MB zip holding every schedule for every filer -- 4,400
+institutions today, 8,900 in 2001 -- so a 2013-start window is ~350 MB and a
+2001-start one ~850 MB, at about two quarters a minute behind the one rate
+limiter in ``cdr.py``.  The NIC structure files (attributes, relationships
+and the transformations table the lineage walk reads) are fetched first.
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ def _date(value: str) -> dt.date:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--since", type=_date, default=dt.date(2013, 1, 1))
+    ap.add_argument("--since", type=_date, default=dt.date(2001, 1, 1))
     ap.add_argument("--until", type=_date, default=None)
     ap.add_argument("--refresh", action="store_true", help="re-download cached files")
     ap.add_argument(
