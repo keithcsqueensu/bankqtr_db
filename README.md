@@ -29,12 +29,17 @@ uv run python scripts/build_panel.py --since 2020-01-01 --html-fallback --ir
 ```
 
 The FFIEC build is independent and can be run on its own; it needs no EDGAR
-data except the cached submissions the RSSD resolver reads EINs from:
+data except the cached submissions the RSSD resolver reads EINs from. It
+starts at **2001Q1** and follows each firm back through its predecessors:
 
 ```bash
-uv run python scripts/fetch_call.py --since 2013-01-01
-uv run python scripts/build_call_panel.py --since 2013-01-01
+uv run python scripts/fetch_call.py                      # 102 quarters, ~850 MB
+uv run python scripts/build_call_panel.py                # 2001Q1 onward, with lineage
 ```
+
+See [Going back to 2001](#going-back-to-2001) and
+[docs/extending-to-2001.md](docs/extending-to-2001.md) before using the rows
+before 2013.
 
 The XBRL half of the panel reaches back to **2013**. The HTML and IR fallbacks
 do not — both were written against post-2020 layouts — so hold them at 2020
@@ -484,9 +489,10 @@ own totals — numbers that can be *checked* rather than merely believed.
 ```bash
 export BANKQTR_UA="you@yourdomain.com"
 
-uv run python scripts/fetch_call.py --since 2013-01-01      # ~350 MB, 54 quarters
+uv run python scripts/fetch_call.py                         # ~850 MB, 102 quarters + NIC files
 uv run python scripts/resolve_rssd.py --write-config        # bank -> RSSD, once
-uv run python scripts/build_call_panel.py --since 2013-01-01
+uv run python scripts/build_call_panel.py                   # 2001Q1 onward, with lineage
+uv run python scripts/build_call_panel.py --since 2013-01-01 --no-lineage   # the 2026 RSSDs' own subtrees only
 ```
 
 Fetching and building are separate on the same terms as the EDGAR side:
@@ -496,11 +502,13 @@ Outputs land in `data/out/`:
 
 | File | Contents |
 |---|---|
-| `call_panel.parquet` / `.csv` | the holding-company panel — 1,929 bank-quarters, 38 firms, 2013Q1–2026Q2 |
-| `call_panel_charters.parquet` | one row per **bank charter** per quarter — 3,849 rows, 103 charters |
+| `call_panel.parquet` / `.csv` | the holding-company panel — 3,676 bank-quarters, 38 firms, 2001Q1–2026Q2 |
+| `call_panel_charters.parquet` | one row per **bank charter** per quarter — 30,802 rows, 1,123 charters, each with the predecessor it came through |
 | `call_panel_coverage.csv` | per bank and variable: how many quarters are populated |
-| `call_panel_flags.csv` | bank-quarters failing a sanity check |
-| `call_panel_build_info.json` | the window, settings, commit and cell counts |
+| `call_panel_coverage_delta.csv` | before/after the lineage extension: quarters added per firm, and how many carry predecessor history |
+| `call_panel_flags.csv` | bank-quarters failing a sanity check, or carrying synthetic (predecessor) history |
+| `call_panel_build_info.json` | the window, settings, commit, cell counts — and the decision log for every schedule break and variable the 2001 window required |
+| `rssd_lineage.csv` | every predecessor of every firm: who was absorbed into whom, when, and how (merger / fdic_assisted / reorg) |
 | `rssd_resolution.csv` | how each firm was matched to its RSSD, with the evidence |
 | `source_diff.csv` | EDGAR against FFIEC, per bank-quarter per variable |
 | `source_diff_summary.csv` | the same, aggregated per bank and variable |
@@ -539,10 +547,12 @@ categories may overlap.
 | `bankqtr_db` (XBRL) | 90.0 | — |
 | `callrpt_db` (Call Report) | **100.0** | 93.0 |
 
-Across 3,849 charter-quarters the leaves tie to RC-C's own total **exactly** in
-3,280 of them. Not one of the remainder is an over-count; every one is
-under-allocation, and it has a single cause described under *What it does not
-buy* below.
+Across 30,802 charter-quarters the leaves tie to RC-C's own total **exactly**
+in 29,249 of them (95.0%), on the 2001 form as on the 2026 one. None of the
+remainder is an over-count beyond a handful of 2001 filers' own arithmetic
+(a few thousand dollars on books of tens of millions); the rest is
+under-allocation with a single cause described under *What it does not buy*
+below.
 
 **Owner-occupied against investor CRE, for everyone.** The EDGAR panel calls
 this split "partial" because it depends on the bank breaking it out. Items F160
@@ -552,12 +562,18 @@ quarter.
 **Capital.** CET1, tier 1, total capital and risk-weighted assets come off
 Schedule RC-R. The XBRL path has no dependable tags for these and the EDGAR
 panel carries none. Populated from 2015 onward — Basel III restructured RC-R
-Part I that year, and the 2013–2014 quarters report a different set of items,
-so those 263 bank-quarters are null rather than approximated from the old ones.
+Part I that year — and **null** before it rather than approximated from the
+old items. The regime before 2015 is carried under its own names
+(`tier1_capital_basel1`, `total_capital_basel1`, `risk_weighted_assets_basel1`
+and their ratios) and never spliced into the Basel III columns;
+`tier1_leverage_ratio` is the one series that spans both, and the build info
+says where its numerator's definition steps.
 
-**Depth.** CDR offers 102 quarters back to 2001Q1 — a full credit cycle,
-including 2008, which the 2013-start EDGAR panel does not reach. The build is
-capped at 2013 only to match it; `--since 2001-01-01` works.
+**Depth.** 102 quarters back to 2001Q1 — two full credit cycles, including
+2007–2009, which the 2013-start EDGAR panel does not reach — and, because
+each firm is followed through its predecessors, the 2007 rows are Wells Fargo
+*and* Wachovia, PNC *and* National City, Truist as BB&T *and* SunTrust *and*
+Colonial. See [Going back to 2001](#going-back-to-2001).
 
 ### What it does not buy
 
@@ -596,8 +612,13 @@ exposure the form never breaks out abroad. BNY Mellon at 2017Q3 is the clearest
 case: $29.5bn consolidated against $15.6bn domestic, with $4.9bn of the
 difference belonging to lines that have no foreign column to sit in. This is
 reported, not hidden — as `loans_unallocated` in dollars, as `rcc_residual_pct`
-as a share, and as the `rcc_partition_under` flag, which fires on 552 of 1,929
-bank-quarters and is the only flag the build raises.
+as a share, and as the `rcc_partition_under` flag, which fires on 1,308 of
+3,676 bank-quarters. The only other arithmetic flags the build raises are one
+`rcc_partition_over` — $8,000 on M&T's $70bn book in 2003Q1, a filer's own
+rounding — and one `nonaccrual_exceeds_loans`, at Ameriprise Bank in 2012Q3,
+when nearly its whole book was held for sale and so outside `loans_total`.
+Everything else in `call_panel_flags.csv` is the predecessor bookkeeping
+described under [Going back to 2001](#going-back-to-2001).
 
 **Office CRE and leveraged lending are not here either.** The Call Report has no
 property-type breakdown. Those remain IR-supplement territory, and the EDGAR
@@ -607,8 +628,9 @@ build is the one that reaches them.
 
 ```
 cdr.py         CDR bulk download (an ASP.NET form, not an API), cached per quarter
-nic.py         NIC entity graph: who owns whom, dated; EIN bridge to EDGAR
-mdrm.py        MDRM item codes -> panel variables, with the partition checks
+nic.py         NIC entity graph: who owns whom, dated; who became whom; EIN bridge to EDGAR
+lineage.py     each 2026 firm's predecessors, quarter by quarter, from the NIC graph
+mdrm.py        MDRM item codes -> panel variables across four redesigns of the form
 schedules.py   bulk TSV -> long frame -> one column per variable
 panel.py       long -> charter panel -> holding-company panel, ratios, checks
 crosscheck.py  EDGAR against FFIEC: agreement, stability, coverage gained
@@ -670,6 +692,38 @@ test in `tests/test_callrpt.py`.
   (`050412693` against `50412693`), State Street and Santander USA — and
   Citizens then fell through to a name match, where there is an *unrelated*
   active bank holding company also called Citizens Financial Group, Inc.
+- **The sum of nothing is zero.** Polars sums an all-null column to 0, so a
+  column no charter reported rolled up as 0.0 rather than null: CET1 of 0.0
+  for every bank before 2015, nonaccrual of 0.0 for every bank before 2017.
+  The rollup now keeps null.
+- **RC-N had no total row before 2017.** Items 1403/1406/1407 exist from
+  2017Q1, so a build that reads only them carries nothing for 2013–2016. The
+  total is built from fourteen category rows, checked against the form's own
+  total from 2017 on (99.6% tie) — which is how it emerged that agricultural
+  loans and real-estate loans to non-US addressees are memoranda inside other
+  rows, and that form 031's foreign-office loans sit on their own `RCFN` line.
+- **F180 is not nonaccrual.** RC-N lays out owner-occupied CRE as F178
+  (30–89), F180 (90+), F182 (nonaccrual). The nonaccrual columns read the
+  90-days-past-due one; JPMorgan's nonaccrual owner-occupied CRE came out at
+  $1m.
+- **Push-down accounting restarts the year.** An acquired charter's
+  year-to-date begins again on the acquisition date, so differencing Fleet
+  National Bank's 2004Q2 against its Q1 gave charge-offs of −$115m. A fall in
+  a gross flow that cannot fall marks the restart, and the quarter is taken
+  as the year-to-date since it.
+- **Pooling restates the survivor.** A common-control merger has the survivor
+  report income as if combined from January 1, so its next difference carries
+  the absorbed charter's whole year to date — already counted under that
+  charter's own RSSD. NIC's accounting-method flag says which mergers these
+  are and the amount is taken back out.
+- **Acquisitions are not transformations.** NIC's transformations table
+  records mergers and failures; a company bought and kept as a subsidiary —
+  Countrywide, Merrill Lynch, Bear Stearns, MUFG Americas — appears only as a
+  control relationship that begins on the closing date. Both tables are read.
+- **NIC's attribute files omit real filers.** Discover Bank, MUFG Union Bank,
+  FirstMerit Bank and National City Bank have no attributes row. The Call
+  Report roster is the authority on who is a depository, and supplies the
+  names NIC lacks.
 
 ### Identity: which RSSD is which bank
 
@@ -694,19 +748,71 @@ Two refinements were needed and both came from the data:
   other era, and the quarter's filers are the union — seven charters before the
   merger, one after.
 
+### Going back to 2001
+
+The panel's floor is 2001Q1, and before 2013 — and in a good many quarters
+after — the organisation summed is not the 2026 RSSD's own subtree but its
+**lineage**: every predecessor later merged, acquired or failed into it, for
+every quarter that predecessor still stood on its own. `rssd_lineage.csv` is
+the map (1,654 predecessors of 38 firms; 95 of them FDIC-assisted failures,
+125 acquisitions that NIC records only as a change of control),
+and every bank-quarter says how much of it is reconstructed:
+
+| Column | Meaning |
+|---|---|
+| `has_predecessor`, `predecessor_count`, `predecessors` | summed across organisations that were separate at the time, and which |
+| `predecessor_failed` | includes an institution that subsequently failed — the stress observations |
+| `n_insured_not_filing` | insured depositories in the tree that filed no Call Report (TFR-filing thrifts before 2012Q1): the sum is a floor |
+| `rcn_total_built` | RC-N total built from category rows (the form had none before 2017) |
+| `n_flow_resets` | charters whose income statement restarted that quarter (push-down accounting) |
+
+Three consequences to read before using the long window:
+
+- **Thrifts are invisible before 2012Q1.** Washington Mutual, Golden West,
+  Countrywide Bank, Sovereign, ING Direct and IndyMac filed a Thrift Financial
+  Report, which CDR does not hold. They are in the lineage and contribute
+  nothing; JPMorgan's loan book jumps by WaMu's entirety at 2008Q3, and
+  `n_insured_not_filing` says why.
+- **A firm tracked in its own right is never also its acquirer's history.**
+  Discover Bank is Discover's row until Discover's last filing and Capital
+  One's only afterwards.
+- **The 2013–2026 rows changed too.** Truist carries SunTrust from 2013Q1;
+  First Citizens carries CIT and SVB; the EDGAR cross-check compares such rows
+  against the standalone SEC filer and they legitimately differ — read
+  `source_diff_summary.csv` on the rows with `has_predecessor = false`. And
+  four defects in the previous build are corrected: the all-null-to-zero
+  rollup, the missing RC-N totals for 2013–2016, the CRE nonaccrual columns
+  reading the wrong RC-N column, and null C&I charge-offs for every 041 filer.
+
+Twenty-odd variables were added for the window — noncurrent loans and the
+Texas ratio, delinquency and nonaccrual by loan category, TDRs, segment
+charge-off rates, unused commitments, brokered deposits and wholesale funding,
+tangible common equity, the pre-Basel III capital items, PPNR — and two
+coarser partition leaves (`loans_cre_nonfarm_nonres`,
+`loans_consumer_installment`) carry CRE and consumer lending continuously
+across the 2007 and 2011 form changes that the finer columns cannot cross.
+`call_panel_build_info.json` records every one with its items, its rationale
+and its comparability caveats; [docs/extending-to-2001.md](docs/extending-to-2001.md)
+records how the lineage is derived and what the form changes required.
+
 ### Testing
 
 ```bash
-uv run pytest tests/test_callrpt.py -q
+uv run pytest tests/test_callrpt.py tests/test_lineage.py -q
 ```
 
-35 tests. The unit tests build a bulk file in memory with the real row shape, so
-they run without `data/raw/call`; the two integration tests are skipped when no
-quarter is cached. The strongest is `test_partition_ties_for_a_real_quarter`,
-which asserts across every one of the ~4,300 filers in the latest quarter that
-the loan categories never sum to *more* than RC-C's own total — under-allocation
-is the form, over-allocation is always a mapping defect, and every trap listed
-above showed up there first.
+62 tests. The unit tests build a bulk file in memory with the real row shape,
+and a small NIC by monkeypatching the structure loaders, so they run without
+`data/raw`; the integration tests are skipped when no quarter or no NIC file is
+cached. The strongest are `test_partition_ties_for_a_real_quarter` (and its
+2001 twin), which assert across every filer in a quarter that the loan
+categories never sum to *more* than RC-C's own total, and
+`test_rcn_categories_reproduce_the_forms_total`, which holds the pre-2017
+RC-N total construction to the form's own total where both exist.
+`test_lineage.py` pins lineage completeness over the universe, that a
+predecessor and its successor are never both summed in a quarter, and that
+Colonial, Washington Mutual, First Republic and Park National are flagged as
+FDIC-assisted.
 
 ### Extending
 
@@ -718,9 +824,15 @@ above showed up there first.
 - **New bank**: add it to `bankqtr_db/config.py` and rerun
   `scripts/resolve_rssd.py --write-config`; the RSSD, the charter set and the
   evidence are all derived.
-- **An older era**: `--since 2001-01-01`. Expect the pre-2009 forms to need more
-  `alternatives` — the partition check will say exactly which items are missing
-  and for how many filers.
+- **An older code for an existing item**: append it as an `alternatives`
+  group, coarsest first, never as a new item; the most-complete-variant rule
+  then prefers the modern detail wherever a filer reports it. The partition
+  checks and `test_rcn_categories_reproduce_the_forms_total` say exactly what
+  a change did across every filer.
+- **A new predecessor rule**: `lineage.resolve` has two — transformations into
+  a member, and relationships that bring an outsider in. Anything added there
+  must keep `test_predecessor_and_successor_in_the_same_quarter_are_not_both_summed`
+  green.
 
 ## HTML fallback
 
@@ -743,10 +855,11 @@ uv run pytest tests/ -q
 uv run ruff check .
 ```
 
-218 tests across both builds. Every one corresponds to a defect that produced
+245 tests across both builds. Every one corresponds to a defect that produced
 plausible but wrong numbers during development — the dangerous kind, since
-nothing raises and the panel still renders. `tests/test_callrpt.py` covers the
-FFIEC path and needs no cached data for all but two of its cases.
+nothing raises and the panel still renders. `tests/test_callrpt.py` and
+`tests/test_lineage.py` cover the FFIEC path and need no cached data for all
+but their integration cases.
 
 ## Extending
 
