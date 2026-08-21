@@ -21,6 +21,7 @@ import logging
 
 import polars as pl
 
+from . import html_fallback
 from . import panel as panel_mod
 from .config import THIN_LOAN_BOOK, Bank, universe
 from .variables import RATIOS
@@ -182,7 +183,18 @@ def _widen(resolved: pl.DataFrame) -> pl.DataFrame:
 # both would leave a consumer choosing between two similarly named columns with
 # different coverage and no way to tell which is meant.  Only a disclosure with
 # no panel column at all comes through.
-HTML_NEW_COLUMNS: tuple[str, ...] = ("loans_office_cre",)
+#
+# The grid specs' columns qualify on exactly the same test as
+# ``loans_office_cre``: no filing tags a past-due bucket by loan class or an
+# origination-year balance, so there is no XBRL column for them to land in.
+# They are derived from the specs by ``html_fallback.grid_columns`` rather
+# than listed here, because a column left off this tuple is not an error that
+# raises -- it is a reading that is parsed, scaled and then silently dropped at
+# the merge.
+HTML_NEW_COLUMNS: tuple[str, ...] = (
+    "loans_office_cre",
+    *html_fallback.grid_columns(),
+)
 
 
 def fill_gaps(
@@ -381,7 +393,22 @@ def _reject_partial_book(panel: pl.DataFrame, wide: pl.DataFrame) -> pl.DataFram
 
 # Slice of the loan book, so it cannot exceed the loan book.  ``loans_total``
 # is excluded because it *is* the book.
-_SUBSET_OF_LOANS = ("loans_", "acl_", "nonaccrual_", "cq_", "pd_")
+#
+# ``dpd_`` and ``vintage_`` are here because the grid specs create columns
+# under names no other prefix covers, and a new column with no XBRL
+# counterpart is exactly what this check exists for -- it is the case that let
+# US Bancorp's leveraged lending through at $1.18 trillion.  A delinquency
+# bucket for one loan class and the balance originated in one year are both
+# slices of the book, so both are bounded by it.
+_SUBSET_OF_LOANS = (
+    "loans_",
+    "acl_",
+    "nonaccrual_",
+    "cq_",
+    "pd_",
+    "dpd_",
+    "vintage_",
+)
 
 # A little headroom: a supplement rounds to a different precision than XBRL,
 # and unfunded commitments occasionally ride along in a disclosed total.

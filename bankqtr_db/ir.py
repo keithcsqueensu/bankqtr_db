@@ -55,7 +55,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import httpx
 
@@ -581,8 +581,32 @@ def _text(html: str) -> str:
     return re.sub(r"\s+", " ", _TAG.sub(" ", html)).strip()
 
 
+# Bumped whenever what an index row *holds* changes, on the same reasoning as
+# the content classifier's version below: entries written before
+# ``_document_name`` learned to read the iXBRL viewer's ``doc=`` parameter name
+# every inline exhibit "ix", and a stale cache is indistinguishable from a
+# filing that genuinely has no EX-13.
+_INDEX_CACHE_VERSION = 2
+
+
 def _index_cache_path(accn: str) -> Path:
-    return IR_DIR / "_index_cache" / f"{accn}.json.gz"
+    return IR_DIR / "_index_cache" / f"v{_INDEX_CACHE_VERSION}_{accn}.json.gz"
+
+
+def _document_name(href: str) -> str:
+    """The document's own filename, not the viewer's.
+
+    An inline-XBRL attachment is linked through the iXBRL viewer rather than
+    directly -- ``/ix?doc=/Archives/.../wfc-20251231.htm`` -- so the path is
+    ``/ix`` and the real filename is in the query string.  Reading the path
+    alone names every such exhibit ``ix``, which is not fetchable and, worse,
+    is the *same* name for all of them, so they are indistinguishable from one
+    another.  Wells Fargo, US Bancorp and BNY Mellon all file their EX-13 this
+    way.
+    """
+    parsed = urlparse(href)
+    doc = parse_qs(parsed.query).get("doc")
+    return Path(urlparse(doc[0]).path if doc else parsed.path).name
 
 
 def exhibit_index(folder_url: str, accn: str) -> list[tuple[str, str, str]]:
@@ -618,7 +642,7 @@ def exhibit_index(folder_url: str, accn: str) -> list[tuple[str, str, str]]:
         href = _DOC_HREF.search(row_html)
         if not href:
             continue
-        name = Path(urlparse(href.group(1)).path).name
+        name = _document_name(href.group(1))
         texts = [_text(c) for c in cells]
         # Layout is: Seq | Description | Document | Type | Size
         description = texts[1] if len(texts) > 1 else ""

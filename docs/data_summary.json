@@ -1,0 +1,154 @@
+{
+  "generated_utc": "2026-08-21 23:14 UTC",
+  "ffiec": {
+    "rows": 3763,
+    "columns": 279,
+    "banks": 38,
+    "start": "2001-03-31",
+    "end": "2026-06-30",
+    "parquet_bytes": 3721874,
+    "csv_bytes": 11163296
+  },
+  "edgar": {
+    "rows": 781,
+    "columns": 530,
+    "banks": 31,
+    "start": "2020-03-31",
+    "end": "2026-06-30",
+    "parquet_bytes": 508821,
+    "csv_bytes": 1441035
+  },
+  "rate_audit": [
+    {
+      "column": "nco_rate",
+      "n_values": 3710,
+      "p50": 0.38550337817710667,
+      "p90": 2.8518170809692913,
+      "p99": 7.105833945006861,
+      "max": 1644051.6129032257,
+      "flagged": 235,
+      "corrected": 0,
+      "nulled": 1,
+      "quality_issues": [
+        {
+          "ticker": "AMP",
+          "period": "2012-09-30",
+          "value": 1644051.6129032257,
+          "numerator": 127414000.0,
+          "denominator": 31000.0,
+          "denominator_median": 409186500.0,
+          "reason": "loans_total is not a usable base for this quarter"
+        }
+      ]
+    },
+    {
+      "column": "nco_rate_ci",
+      "n_values": 3554,
+      "p50": 0.30442890840368736,
+      "p90": 2.0164901659053807,
+      "p99": 7.886611080159772,
+      "max": 50.8319075603164,
+      "flagged": 137,
+      "corrected": 0,
+      "nulled": 0,
+      "quality_issues": []
+    },
+    {
+      "column": "nco_rate_cre",
+      "n_values": 3313,
+      "p50": 0.01088251070891842,
+      "p90": 0.918923515511719,
+      "p99": 4.732143528263186,
+      "max": 40.10439879529463,
+      "flagged": 436,
+      "corrected": 0,
+      "nulled": 0,
+      "quality_issues": []
+    },
+    {
+      "column": "nco_rate_card",
+      "n_values": 2812,
+      "p50": 3.619146534272174,
+      "p90": 6.637677047513978,
+      "p99": 12.298682284040996,
+      "max": 2503.8803381747234,
+      "flagged": 9,
+      "corrected": 0,
+      "nulled": 8,
+      "quality_issues": [
+        {
+          "ticker": "RF",
+          "period": "2004-12-31",
+          "value": 2503.8803381747234,
+          "numerator": 28876000.0,
+          "denominator": 4613000.0,
+          "denominator_median": 956189000.0,
+          "reason": "loans_credit_card is not a usable base for this quarter"
+        },
+        {
+          "ticker": "RF",
+          "period": "2005-03-31",
+          "value": 44.89067380633646,
+          "numerator": 503000.0,
+          "denominator": 4482000.0,
+          "denominator_median": 956189000.0,
+          "reason": "loans_credit_card is not a usable base for this quarter"
+        },
+        {
+          "ticker": "RF",
+          "period": "2005-06-30",
+          "value": -41.32231404958678,
+          "numerator": -325000.0,
+          "denominator": 3146000.0,
+          "denominator_median": 956189000.0,
+          "reason": "loans_credit_card is not a usable base for this quarter"
+        },
+        {
+          "ticker": "RF",
+          "period": "2005-09-30",
+          "value": -40.86021505376344,
+          "numerator": -247000.0,
+          "denominator": 2418000.0,
+          "denominator_median": 956189000.0,
+          "reason": "loans_credit_card is not a usable base for this quarter"
+        },
+        {
+          "ticker": "RF",
+          "period": "2005-12-31",
+          "value": -1889.9082568807341,
+          "numerator": -515000.0,
+          "denominator": 109000.0,
+          "denominator_median": 956189000.0,
+          "reason": "loans_credit_card is not a usable base for this quarter"
+        },
+        {
+          "ticker": "RF",
+          "period": "2006-03-31",
+          "value": -2897.297297297297,
+          "numerator": -268000.0,
+          "denominator": 37000.0,
+          "denominator_median": 956189000.0,
+          "reason": "loans_credit_card is not a usable base for this quarter"
+        },
+        {
+          "ticker": "RF",
+          "period": "2006-06-30",
+          "value": -3856.0,
+          "numerator": -241000.0,
+          "denominator": 25000.0,
+          "denominator_median": 956189000.0,
+          "reason": "loans_credit_card is not a usable base for this quarter"
+        },
+        {
+          "ticker": "RF",
+          "period": "2006-09-30",
+          "value": -5907.692307692308,
+          "numerator": -192000.0,
+          "denominator": 13000.0,
+          "denominator_median": 956189000.0,
+          "reason": "loans_credit_card is not a usable base for this quarter"
+        }
+      ]
+    }
+  ]
+}

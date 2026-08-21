@@ -35,6 +35,8 @@ starts at **2001Q1** and follows each firm back through its predecessors:
 ```bash
 uv run python scripts/fetch_call.py                      # 102 quarters, ~850 MB
 uv run python scripts/build_call_panel.py                # 2001Q1 onward, with lineage
+uv run python scripts/fetch_call.py --tfr                # the thrifts CDR has nothing for
+uv run python scripts/build_call_panel.py --tfr          # ...folded in
 ```
 
 See [Going back to 2001](#going-back-to-2001) and
@@ -101,7 +103,7 @@ xbrl.py        companyfacts + instance -> unified long frame, dedup, restatement
 taxonomy.py    heterogeneous dimension members -> canonical categories
 variables.py   declarative variable and ratio definitions
 panel.py       long frame -> bank-quarter panel (selection, quarterisation, ratios)
-html_fallback.py  pandas.read_html table parsing for what XBRL never carries
+html_fallback.py  filing HTML (10-K/10-Q, or its EX-13) -> tables -> long frame
 ir.py          IR supplement discovery and download (Q4 feed / page / 8-K)
 ir_extract.py  supplement + presentation -> long frame (tables, lines, phrases)
 reconcile.py   prefer XBRL, then HTML, then IR; report coverage and quality
@@ -559,6 +561,53 @@ this split "partial" because it depends on the bank breaking it out. Items F160
 and F161 are fixed lines on the form, so every filer reports both, every
 quarter.
 
+**Uninsured deposits, and the small-business book.** Three more schedules, all
+on the form under one code or another since 2001Q1:
+
+| Column | Schedule | Items |
+|---|---|---|
+| `deposits_uninsured` | RC-O 2.a | 5597 |
+| `loans_small_business_ci` | RC-C II item 3 | 5571 + 5573 + 5575 |
+| `loans_small_business_cre` | RC-C II item 2 | 5565 + 5567 + 5569 |
+| `deposits_in_banks_average` | RC-K | 3381 |
+| `securities_average` | RC-K | B558 + B559 + B560 |
+
+Two of those needed the schedule's own label row read code by code rather than
+taken from the code numbers, and both would have been quiet errors:
+
+- **RC-C Part II is a size-bucket schedule, and it alternates counts with
+  balances.** It is not a breakdown by borrower type; it is the same two RC-C
+  Part I categories counted again by the *original amount* of the loan, in
+  three buckets. So the small-business balance is the sum of three codes, not
+  one — taking only the first reads the book as a third of itself. And
+  `5572` is "NO OF LOANS > $100,000 THRU $250,000", a **loan count** sitting
+  between two balance columns; mapping it as a balance puts a four-figure
+  number of loans through the thousands scale and reports it as millions of
+  dollars. Because a count is small, no bound check would ever have caught it.
+- **RC-K has no average-securities line and no `3516`/`3517`.** Neither code
+  appears in any schedule of any of the 102 bulk files. What RC-K carries is
+  the three-way split of the securities average, and the interbank average
+  under `3381`.
+
+**`deposits_uninsured` is a filer's option, and the panel says how much of each
+firm it covers.** RC-O item 2 asks whether the bank has a method to estimate
+its uninsured deposits; item 2.a is the estimate, reported only by those that
+answer yes. Coverage is therefore partial and always has been — 869 of this
+universe's 956 charters at 2001Q2, 46 of 64 at 2026Q2 — and, worse for a
+rollup, partial *within* an organisation. Summing what is present would make
+a group's figure a floor with nothing to say so, so
+`deposits_uninsured_coverage_pct` carries the share of the firm's own deposits
+sitting in charters that reported an estimate, weighted by deposits rather
+than by charter count. At 2001Q2 twenty of thirty-two firms are partial on
+that measure; by 2026Q2 all thirty-five are complete.
+
+None of these has a total on the form to cross-foot against, so they are
+checked as **bounds** rather than partitions — `mdrm.BoundCheck`, which
+asserts only what the form guarantees, that a subset cannot exceed the set it
+is drawn from. All three hold on every one of the 3,741 bank-quarters. That is
+a guard rail and not evidence: what established the mappings was the label
+row.
+
 **Capital.** CET1, tier 1, total capital and risk-weighted assets come off
 Schedule RC-R. The XBRL path has no dependable tags for these and the EDGAR
 panel carries none. Populated from 2015 onward — Basel III restructured RC-R
@@ -762,17 +811,20 @@ and every bank-quarter says how much of it is reconstructed:
 |---|---|
 | `has_predecessor`, `predecessor_count`, `predecessors` | summed across organisations that were separate at the time, and which |
 | `predecessor_failed` | includes an institution that subsequently failed — the stress observations |
-| `n_insured_not_filing` | insured depositories in the tree that filed no Call Report (TFR-filing thrifts before 2012Q1): the sum is a floor |
+| `n_insured_not_filing` | insured depositories in the tree that filed no Call Report (TFR-filing thrifts before 2012Q1): without `--tfr` the sum is a floor |
+| `n_tfr_backfilled` | how many of those were recovered from FDIC BankFind (`--tfr` builds only) |
+| `deposits_uninsured_coverage_pct` | share of the firm's deposits in charters that reported an uninsured estimate; RC-O item 2.a is a filer's option |
 | `rcn_total_built` | RC-N total built from category rows (the form had none before 2017) |
 | `n_flow_resets` | charters whose income statement restarted that quarter (push-down accounting) |
 
 Three consequences to read before using the long window:
 
-- **Thrifts are invisible before 2012Q1.** Washington Mutual, Golden West,
-  Countrywide Bank, Sovereign, ING Direct and IndyMac filed a Thrift Financial
-  Report, which CDR does not hold. They are in the lineage and contribute
-  nothing; JPMorgan's loan book jumps by WaMu's entirety at 2008Q3, and
-  `n_insured_not_filing` says why.
+- **Thrifts are invisible before 2012Q1 unless you build with `--tfr`.**
+  Washington Mutual, Golden West, Countrywide Bank, Sovereign, ING Direct and
+  IndyMac filed a Thrift Financial Report, which CDR does not hold. Without
+  the backfill they are in the lineage and contribute nothing, and JPMorgan's
+  loan book jumps by WaMu's entirety at 2008Q3. `n_insured_not_filing` says
+  where that happens; [the thrift gap](#the-thrift-gap) says what closes it.
 - **A firm tracked in its own right is never also its acquirer's history.**
   Discover Bank is Discover's row until Discover's last filing and Capital
   One's only afterwards.
@@ -795,13 +847,96 @@ across the 2007 and 2011 form changes that the finer columns cannot cross.
 and its comparability caveats; [docs/extending-to-2001.md](docs/extending-to-2001.md)
 records how the lineage is derived and what the form changes required.
 
+### The thrift gap
+
+An OTS-supervised savings institution filed a **Thrift Financial Report**, not
+a Call Report, until the TFR was retired after 2011Q4. CDR holds nothing for
+those institutions, so the largest thrifts of the last cycle sit in the
+lineage and contribute zero to every quarter they existed. The effect is not
+subtle: JPMorgan's loan book rises **44.2%** at 2008Q3, the quarter its Call
+Report first consolidates Washington Mutual, and reads as growth.
+
+The FDIC compiles its own quarterly series from whichever report an insured
+institution filed and publishes it on one schema. That is the whole reason
+this is closeable: the TFR numbers exist, mapped into common fields, and it is
+only the FFIEC bulk files that are Call-Report-only.
+
+```bash
+uv run python scripts/build_call_panel.py                 # the gap is measured here
+uv run python scripts/fetch_call.py --tfr                 # then fetched
+uv run python scripts/build_call_panel.py --tfr           # then folded in
+```
+
+Three steps because which institutions are missing is a property of the
+*panel* — it depends on the lineages, so on the universe — and because
+fetching and building stay separate on the same terms as everywhere else here:
+`build_call_panel --tfr` reads only what is cached and never goes to the
+network.
+
+| | Without `--tfr` | With |
+|---|---:|---:|
+| bank-quarters | 3,676 | **3,741** |
+| charter-quarters | 30,802 | **32,244** |
+| JPMorgan's 2008Q3 loan growth | **+44.2%** | −2.0% |
+
+69 of the 69 non-filing depositories in this universe's lineages resolve, for
+2,524 quarterly rows. Washington Mutual arrives as a $307bn bank whose
+nonaccruals run 2.9 → 9.7 $bn through 2007–2008, which is the observation the
+long window exists for.
+
+**The join is on RSSD, not on name.** BankFind's institution record carries
+`FED_RSSD` and NIC's carries `fdic_cert`, so the two registries bridge on an
+identifier each collects independently — the same standard `resolve_rssd`
+holds the EIN bridge to, and for the same reason.
+
+**The field names were settled by arithmetic, not by documentation.** Three
+identities hold on the rows themselves, and `check_identities` measures them
+on every build rather than asserting them:
+
+| Identity | Settles | Held |
+|---|---|---:|
+| `LNLSGR − LNATRES == LNLSNET` | gross loans, not loans net of the allowance | 2,524 / 2,524 |
+| `NALNLS + P9ASSET == NCLNLS` | nonaccrual **loans**, not nonaccrual assets | 2,517 / 2,524 |
+| `DRLNLS − CRLNLS == NTLNLS` | the two sides of the charge-off, not the net figure | 2,524 / 2,524 |
+
+The second is the BankFind form of the trap that put nonaccrual owner-occupied
+CRE at $1m on the RC-N side. The third matters because `panel.with_nco` builds
+NCO as charge-offs less recoveries: a net figure handed to it would either be
+overwritten or would misstate the gross line by the whole recovery rate.
+
+Four things it deliberately does not do:
+
+- **It is not a Call Report, and it costs the partition check on those rows.**
+  Backfilled rows carry `source = "tfr"` at charter level and populate
+  fourteen columns — the balance sheet, four loan categories, the credit
+  stocks and both sides of the charge-off — and no others. The TFR's loan
+  breakdown does not partition the way RC-C does, so a bank-quarter that
+  includes one has loan categories the RC-C total does not cover, and
+  `rcc_residual` reads as an over-count. It is therefore left **null** on
+  those rows: 796 of 3,763 under `--tfr`, including M&T at 2003Q1, the single
+  genuine over-count in the panel. The evidence is not lost, because it lives
+  a level down — the partition still runs over all 30,802 Call Report
+  charter-quarters and still ties for 29,249. A build without `--tfr` keeps
+  the holding-level check on every row. **That is the trade: the thrifts or
+  the cross-foot, per bank-quarter.**
+- **A charter that filed keeps its Call Report row.** The thrifts moved onto
+  the Call Report in 2012Q1, so the two sources genuinely overlap at the
+  boundary and the filed report wins.
+- **A thrift is attributed only to the quarters its organisation owned it.**
+  WaMu's own history runs from 2001 and it became JPMorgan's on 2008-09-25;
+  the mapping comes from `unfiled_depositories`, so the two cannot disagree
+  about who was missing whom.
+- **`n_insured_not_filing` still counts what filed no Call Report.** That is
+  what it means, and a reader comparing builds should see the same number.
+  What was recovered is `n_tfr_backfilled` beside it.
+
 ### Testing
 
 ```bash
 uv run pytest tests/test_callrpt.py tests/test_lineage.py -q
 ```
 
-62 tests. The unit tests build a bulk file in memory with the real row shape,
+82 tests. The unit tests build a bulk file in memory with the real row shape,
 and a small NIC by monkeypatching the structure loaders, so they run without
 `data/raw`; the integration tests are skipped when no quarter or no NIC file is
 cached. The strongest are `test_partition_ties_for_a_real_quarter` (and its
@@ -821,6 +956,14 @@ FDIC-assisted.
   ordinary balance-sheet item.
 - **New partition check**: add a `PartitionCheck`. Any schedule stating its own
   total can be cross-footed the way RC-C is.
+- **New check where the form states no total**: add a `BoundCheck` instead. It
+  asserts only that a subset does not exceed the set it is drawn from, which
+  is all RC-C Part II and RC-O guarantee. Prefer a `PartitionCheck` wherever
+  one is possible — it is the stronger statement.
+- **A new item's meaning**: read it off the schedule's own label row
+  (`schedules.labels`) rather than from the code number. RC-C Part II
+  alternates loan *counts* with balances under adjacent codes, and a count
+  read as a balance passes every check in this package.
 - **New bank**: add it to `bankqtr_db/config.py` and rerun
   `scripts/resolve_rssd.py --write-config`; the RSSD, the charter set and the
   evidence are all derived.
@@ -836,9 +979,9 @@ FDIC-assisted.
 
 ## HTML fallback
 
-`pandas.read_html` over the primary document, with tables located by matching
-row *labels* rather than position (table ordering is not stable across banks or
-years). Two notes:
+`pandas.read_html` over the primary document, with tables located by the
+caption printed above them and rows by matching *labels* rather than position
+(table ordering is not stable across banks or years). Three notes:
 
 - Filings are fetched as **bytes**: inline-XBRL documents open with an XML
   declaration, and lxml refuses a `str` carrying one.
@@ -847,6 +990,227 @@ years). Two notes:
   against XBRL values for the same bank-quarter and applies it per filing; rows
   whose scale cannot be established are **dropped**, not guessed. A silently
   mis-scaled peer is worse than a missing one.
+- Tables are walked one at a time through lxml so each stays paired with the
+  text above it, which is the same reader `ir_extract` uses and now shares with
+  it. On body text alone a loan schedule, an allowance rollforward, an
+  unfunded-commitment table and a business segment's balance sheet are
+  indistinguishable — every one of them lists the loan classes down the side.
+
+Measured against XBRL over the 210 cached filings — a reading counts as right
+when it matches the XBRL value for the same bank-quarter up to a power of a
+thousand — agreement went from **460 of 1,179 readings (39.0%) to 521 of 1,232
+(42.3%)**: more readings, and fewer disagreements in absolute terms.
+
+### A 10-K need not contain the financial statements
+
+Wells Fargo, US Bancorp and BNY Mellon file a 10-K whose Item 8 reads
+"Information in response to this Item can be found in the Annual Report to
+Shareholders", and file the annual report itself as an **EX-13** in the same
+submission. The primary document is a 1.5 MB wrapper of cross-references; the
+statements are in an 11.6 MB exhibit beside it, and it contains not one
+occurrence of "allowance", "nonaccrual" or "commercial and industrial".
+
+All 21 of the cached filings that yielded no table at all were these three
+banks. It was never a parsing problem, so no parser could have fixed it — the
+document being parsed did not contain the numbers. `extract_filings` therefore
+runs a **second pass**: filings the first pass got nothing from have their
+EX-13 resolved from the filing index, cached beside the primary document as
+`TICKER_ACCN.ex13.html.gz`, and parsed. All 21 now yield data, and the results
+cross-foot against the filings' own totals — Wells Fargo's C&I 452,068 plus CRE
+132,284 plus leases 15,543 makes the 599,895 commercial total its Table 11
+states, and US Bancorp's charge-offs 2,693 less recoveries 529 makes its net
+2,164.
+
+Gating on the parsed result rather than on the text is deliberate: American
+Express names none of the phrases a wrapper also lacks and scores identically
+to one while parsing perfectly well. Gating on the presence of an EX-13 is
+self-limiting for the same reason — EX-13 *is* the annual report, so a filing
+that prints its statements inline has none, and nothing changes for the 189
+filings that already parse.
+
+Finding the exhibit needed a fix in `ir.exhibit_index`, which affects the 8-K
+route too: an inline-XBRL attachment is linked through the viewer
+(`/ix?doc=/Archives/.../wfc-20251231.htm`), so reading the path alone named
+every such exhibit `ix` — not fetchable, and the *same* name for all of them.
+
+### The traps
+
+The first three are sign errors, which is the failure mode this path is most
+exposed to: the magnitude is right, nothing raises, and the value is wrong by
+exactly a factor of −1.
+
+- **A negative is typeset across several cells.** A filing writes a charge-off
+  of (1,423) as three `<td>`s — the opening parenthesis glued to the digits,
+  `read_html`'s duplicate of that cell for the column it spans, then the closer
+  alone — so the minus sign lands in a different cell from the number it
+  belongs to. `_to_number` honoured a parenthesis only when it saw both halves,
+  so `(1,423` parsed as **+1,423**: a $1.4bn charge-off entering the panel as a
+  $1.4bn recovery. 4,799 cells across the 210 cached filings are split this way.
+  Fragments are now rejoined to their closer, but only across padding, a
+  currency marker or `read_html`'s own duplicate — the 1.2% with no closer to
+  be found are left exactly as they were, because inventing one is the same
+  error in the other direction.
+- **…and the currency marker leaves a space behind it.** `$ (3,573)` is
+  balanced and unambiguous, and still parsed as null, because stripping the `$`
+  left a leading space and `startswith("(")` is then false. A whole row dropped
+  for a space.
+- **The sign convention was in only one of the two readers.** `ir_extract`
+  takes balances as magnitudes and leaves flows alone — a provision release and
+  a net recovery are both real — and this module had no notion of it, which
+  went unnoticed only because the split-parenthesis defect was cancelling it
+  out: reading `(1,423` as positive accidentally produced the magnitude the
+  panel wanted. Repairing the parentheses without also applying the convention
+  takes the impossible negative balances from 33 to 42. The rule now lives
+  here, on the lower layer that `ir_extract` already imports from, so the two
+  cannot drift apart.
+
+Across the cached filings those two fixes together change **100 values in 22
+banks** — 67 flow signs corrected (`charge_offs` 29, `nco` 20, `provision` 10,
+`recoveries` 8) and all 33 negative loan balances, allowances and OREO
+readings brought back to magnitudes.
+
+The rest are tables carrying the right row *labels* against the wrong
+population, which `EXCLUDE_LABEL` cannot reach because there is nothing wrong
+with the label. They surfaced on the EX-13 path, where the document is a whole
+annual report rather than one filing and prints every variant of every
+schedule, but two of them were misreading the 10-Ks as well.
+
+- **A rate/volume analysis.** Its rows are "Total loans", "Commercial real
+  estate", "Credit card" — the loan schedule's labels exactly — against the
+  *change in interest income* those books produced. US Bancorp's put total
+  loans at 549 against a real book near 391,000, with the mix in proportion so
+  nothing looked odd.
+- **Unfunded commitments.** Same labels, and the numbers are the lines
+  *available* rather than drawn: Wells Fargo's Table 3.4 reports credit card at
+  180,563 against a book of 59,540.
+- **Average balances**, which sit under the period-end labels — the same trap
+  `ir_extract` guards on the supplement side.
+- **A business segment's balance sheet**, which repeats the consolidated labels
+  over a fraction of the book and is printed *first*. Wells Fargo reports total
+  loans of 223,399 for Commercial Banking against 986,167 consolidated, and it
+  never uses the word "segment" — the caption is "Table 9d: Commercial Banking
+  – Balance Sheet", so the segment has to be matched by name.
+- **…but a *portfolio* segment is a loan class, not a business unit.** Excluding
+  on the bare word threw away the one table this module most wants — "Table 16:
+  Total Loans Outstanding by Portfolio Segment and Class of Financing
+  Receivable" — and left Wells Fargo's C&I reading 157.
+
+Two rules settle what is left when several tables still offer the same
+variable. The caption decides first, weighted three to one over body text; and
+where readings still compete the **largest wins**, which is `ir_extract`'s rule
+and holds for the same reason — every sub-schedule is a subset of the
+consolidated figure. Taking the first instead is a property of the typesetting:
+Wells Fargo's report offers "total loans" at 986,167, 927,491 and 223,399, and
+document order picks between them arbitrarily.
+
+### Grids: when the variable is named by the column
+
+Every spec above reads a row label and takes the left-most number, which in a
+comparative table is the current period. Two disclosures cannot be read that
+way at all, and measuring them is what showed it — the quantity wanted is named
+by the **column**, and the row names only which slice of the book it belongs
+to. `GridSpec` carries a `column_map` beside its `row_map`; the row-addressed
+specs are untouched.
+
+- **Past-due aging.** Rows are loan classes; columns are
+  `Current | 30-89 | 90 days or more | Nonaccruing | Total`. The left-most
+  number is *Current* — the performing balance — so a row-addressed spec
+  matching "residential mortgage" would report Bank of America's performing
+  book as its 30-89 day delinquency. Right label, right magnitude, wrong
+  column, nothing raises.
+- **CECL vintage.** Rows are credit-quality grades under a loan-class heading;
+  columns are origination years. Over the 231 cached documents, **633 of 711**
+  candidate tables put the years in columns and exactly one puts them in rows.
+
+Together they yield 1,847 readings from 16 banks — 1,020 vintage rows over 85
+filings and 827 delinquency rows over 77. Validated against XBRL where the
+panel has a comparable value: 10 of 13 whole-book past-due readings match
+exactly up to a power of a thousand.
+
+**Geographic concentration was measured and skipped.** The target was US
+Census regions (`new_england`, `middle_atlantic`, …). Exactly **one** bank —
+Ameriprise — discloses on that basis. Sixteen disclose by *state*, but that is
+a different variable with a different shape: fifty-odd rows, one table per
+product, so there is no single geographic table per filing to reconcile. The
+rule was fewer than eight banks means skip, and one is fewer than eight.
+
+**What reaches `panel.parquet`.** `reconcile.HTML_NEW_COLUMNS` is an allowlist
+of columns the HTML path may *create*, and these qualify on the same test
+`loans_office_cre` does — no filing tags a past-due bucket by loan class or an
+origination-year balance, so there is no XBRL column for them to land in. The
+names are derived from the specs by `html_fallback.grid_columns()` rather than
+transcribed, because a column left off that tuple does not raise: it is parsed,
+scaled, and then silently dropped at the merge, which looks exactly like a
+filing that disclosed nothing.
+
+Over the 2020Q1–2026Q2 window that fills **1,029 cells** across 36 columns:
+past-due by loan class for up to 12 banks a bucket, and nine origination years
+for 11–14 banks each. Nothing is created empty — the allowlist permits 78
+columns and only the 36 actually extracted appear.
+
+They are bounded like every other slice of the book. `dpd_` and `vintage_`
+were added to `reconcile._SUBSET_OF_LOANS`, so a reading that exceeds the
+tagged loan book by more than 5% is discarded — the check that caught US
+Bancorp's leveraged lending at $1.18 trillion, and which these would otherwise
+have skipped, since neither prefix was covered by the original list. Measured
+on the built panel: 0 of 684 vintage values exceed the loan book, 0 of 345
+delinquency values reach a quarter of it, and none is negative. Truist's
+2020-vintage book comes out at $43.494bn against the 43,494 read by hand off
+its 10-K, so the scale inference carries these as it does the rest.
+
+#### The traps
+
+Four of these were live defects found by running the specs over the corpus,
+not hypotheticals; each has a test.
+
+- **The performing column contains the phrase "30 days past due".** Bank of
+  America heads it "Total current or less than 30 days past due", which a
+  loose bucket pattern matches, and its entire $225bn residential book was
+  read as 30-89 day delinquency against a real 1,639. Only explicit day ranges
+  match now, and the rollup column beside it — "Total past due 30 days or
+  more", the sum of the three buckets — is left unmatched on purpose.
+- **A table title is not a column header.** `read_html` repeats a spanned cell
+  across every column it covers, so Citizens' "Table 13: Nonaccrual loans and
+  leases, accruing and 90 days or more past due and restructured loans" is one
+  cell spanned over thirty columns. It matched the 90-day pattern and mapped
+  that bucket onto the whole width of a table whose columns are *years*.
+- **"Total loans and leases" contains "leases".** Matched first, it reported
+  Bank of America's whole-book 30-89 figure of 5,555 as its lease
+  delinquency — the same order-is-load-bearing trap the allowance rollforward
+  documents for net against gross charge-offs. The whole-book row is now
+  matched first, and feeds `pd_dpd_30_89`, which is where it belongs.
+- **A filing prints the same grid twice.** Once as of the period it reports and
+  again as of the prior year end, and "largest wins" — which settles every
+  other contest in this module — picks the stale one, because an older vintage
+  has amortised *down*: Truist's 2017 origination year is 780 in the 2020
+  table and 590 in the 2021 one. The header date separates them.
+- **An ordinary comparative table has year columns too.** Ally's
+  "December 31, | 2019 | 2018 | 2017" is three reporting periods, and 115 of
+  the 615 candidate tables are that shape. A caption match is therefore
+  required before a grid is read at all, which is stricter than
+  `classify_table`.
+- **A TDR schedule wears the aging table's headings.** Same loan classes down
+  the side, same buckets across the top, over a population two orders of
+  magnitude smaller — Fifth Third's Table 56 reports commercial at 411 against
+  a book near 60,000. `EXCLUDE_LABEL` cannot see it, because every row label in
+  it is an ordinary loan class.
+
+**Vintage totals are built from the grade rows, not read from the total
+rows.** These tables state a *nested* set of totals — "Total", "Total
+commercial" and "Total commercial and industrial" all appear in one table — so
+summing the rows labelled "total" multiplies the book by two to four. It is
+the same hazard `mdrm.ItemSpec` documents on the Call Report side, where a
+filer reports a rollup beside the detail that sums to it. The grades appear
+once per loan class, so summing them across classes is a partition; and
+criticised is taken as everything that is not pass, because the ladder is not
+uniform — Truist writes pass / special mention / substandard / nonperforming
+where others write doubtful and loss. Total less pass is the one definition
+every filer's own table supports, and it keeps the total and the criticised
+share describing the same population.
+
+Checked against Truist's 2020 10-K: criticised 2020-vintage comes out 1,644
+against 970 + 582 + 71 read by hand off the C&I, CRE and construction blocks,
+the balance being the remaining classes.
 
 ## Testing
 
@@ -855,7 +1219,7 @@ uv run pytest tests/ -q
 uv run ruff check .
 ```
 
-245 tests across both builds. Every one corresponds to a defect that produced
+308 tests across both builds. Every one corresponds to a defect that produced
 plausible but wrong numbers during development — the dangerous kind, since
 nothing raises and the panel still renders. `tests/test_callrpt.py` and
 `tests/test_lineage.py` cover the FFIEC path and need no cached data for all
@@ -870,6 +1234,16 @@ but their integration cases.
 - **New bank**: add a `Bank` to `config.py`, and an `IRSource` to `ir.py` if
   its IR site is reachable — without one it still works, falling back to the
   8-K exhibits.
+- **New HTML disclosure**: add a `TableSpec` in `html_fallback.py` where the
+  row label names the variable, or a `GridSpec` where the **column** does —
+  a past-due bucket or an origination year. A `GridSpec` needs a `caption`
+  that matches before the table is read, because a column reader keyed on year
+  headers will otherwise read an ordinary comparative table as a vintage one.
+  A spec introducing a column the panel has never had also needs it named in
+  `reconcile.HTML_NEW_COLUMNS` — `grid_columns()` derives the grid specs' own
+  entries, and `test_every_grid_column_may_be_created_by_the_merge` holds the
+  two together — and its name prefix added to `reconcile._SUBSET_OF_LOANS` if
+  it is a slice of the loan book, so the plausibility ceiling applies to it.
 - **New IR disclosure**: add an `IRTableSpec` (for a schedule) or a
   `PhraseSpec` (for a slide caption) in `ir_extract.py`. A spec that populates
   a column no filing carries also needs its `RatioDef`s in `variables.py` and

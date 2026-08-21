@@ -34,6 +34,39 @@ def _date(value: str) -> dt.date:
     return dt.date.fromisoformat(value)
 
 
+def _fetch_tfr(periods: list[str], *, refresh: bool = False) -> None:
+    """Cache BankFind financials for the depositories that filed no Call Report.
+
+    Which institutions those are is a property of the panel -- it depends on
+    the lineages, and so on the universe -- so this reads the built panel's
+    own ``insured_not_filing`` column rather than deciding again.  A panel has
+    therefore to exist first, which is the ordinary order anyway: build once,
+    fetch the gap, build again with it.
+    """
+    import polars as pl
+
+    from callrpt_db import tfr
+    from callrpt_db.config import OUT
+
+    path = OUT / "call_panel.parquet"
+    if not path.exists():
+        log.error(
+            "--tfr needs %s to know which depositories are missing; "
+            "run build_call_panel.py first",
+            path.name,
+        )
+        return
+    panel = pl.read_parquet(path)
+    _, info = tfr.backfill(panel, periods, refresh=refresh)
+    log.info(
+        "tfr: %d rows cached for %d of %d non-filing depositories; identities %s",
+        info.get("rows", 0),
+        info.get("resolved", 0),
+        info.get("sought", 0),
+        info.get("identities", {}),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--since", type=_date, default=dt.date(2001, 1, 1))
@@ -48,6 +81,16 @@ def main(argv: list[str] | None = None) -> int:
         "--list-periods",
         action="store_true",
         help="print the periods CDR offers and exit",
+    )
+    ap.add_argument(
+        "--tfr",
+        action="store_true",
+        help=(
+            "also fetch FDIC BankFind financials for the insured depositories "
+            "that filed a Thrift Financial Report rather than a Call Report "
+            "(WaMu, Golden West, Sovereign, IndyMac); needs a built panel to "
+            "know which they are"
+        ),
     )
     args = ap.parse_args(argv)
 
@@ -101,6 +144,9 @@ def main(argv: list[str] | None = None) -> int:
 
     have = cdr.cached_periods()
     log.info("cache now holds %d periods (%s..%s)", len(have), have[0], have[-1])
+
+    if args.tfr:
+        _fetch_tfr(have, refresh=args.refresh)
     if failed:
         log.error("%d periods failed: %s", len(failed), ", ".join(p for p, _ in failed))
         return 1

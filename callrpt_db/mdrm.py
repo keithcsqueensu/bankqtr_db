@@ -547,6 +547,134 @@ RC_ITEMS: tuple[ItemSpec, ...] = (
         plus=(("RCFN", ("3360",)),),
         description="Quarterly average of total loans, domestic plus foreign offices (RC-K)",
     ),
+    # Two more RC-K averages, both on the form under these codes for every one
+    # of the 102 quarters.  ``3516`` and ``3517`` were looked for first and are
+    # not RC-K items at all -- no schedule in any bulk file carries either --
+    # so the schedule's own label row is what these were taken from.
+    #
+    # Unlike ``loans_average`` above, these are ordinary two-basis items:
+    # ``RCFD`` for a filer with foreign offices and ``RCON`` otherwise, which
+    # between them cover every charter in the universe exactly once (18 + 46 of
+    # 64 at 2026Q2; 91 + 865 of 956 at 2001Q2).
+    ItemSpec(
+        "deposits_in_banks_average",
+        "RCK",
+        ("3381",),
+        description=(
+            "Quarterly average of interest-bearing balances due from "
+            "depository institutions (RC-K)"
+        ),
+    ),
+    # RC-K states no single average for the securities book.  It splits it
+    # three ways and has since before 2001, so the total is their sum rather
+    # than a line to be read; a filer reporting only some of them contributes
+    # what it reported, which is the ordinary ``ItemSpec`` rule.
+    ItemSpec(
+        "securities_average",
+        "RCK",
+        ("B558", "B559", "B560"),
+        description=(
+            "Quarterly average of investment securities: U.S. Treasury and "
+            "government obligations, mortgage-backed securities, and all "
+            "other securities (RC-K)"
+        ),
+    ),
+)
+
+# --------------------------------------------------------------------------
+# Schedule RC-O -- deposit insurance
+# --------------------------------------------------------------------------
+#
+# One item, and the reason to want it is 2023: an uninsured share is what runs.
+# It is on the form from 2001Q1 under the same code throughout, on ``RCON``
+# only -- there is no ``RCFD5597``, because deposit insurance is a
+# domestic-office concept.
+#
+# **It is a filer's option, not a required line.**  RC-O item 2 asks whether
+# the bank has "a method to estimate" its uninsured deposits and item 2.a is
+# the estimate, reported only by those that answer yes.  So coverage is
+# partial and always has been -- 869 of this universe's 956 charters at
+# 2001Q2, 46 of 64 at 2026Q2 -- and, worse for a rollup, it is partial *within*
+# an organisation: a holding company's small charters may report nothing while
+# its large ones do.  Summing what is present would then understate the group
+# with no sign that anything was missing.
+#
+# ``panel.roll_up`` therefore also carries the share of the
+# organisation's own deposits that sits in charters which reported the
+# estimate, so a reader can tell a complete figure from a partial one.  At
+# 2001Q2 twenty of thirty-two firms are partial on that measure and one
+# reports nothing at all; by 2026Q2 all thirty-five are complete.
+
+RCO_ITEMS: tuple[ItemSpec, ...] = (
+    ItemSpec(
+        "deposits_uninsured",
+        "RCO",
+        ("5597",),
+        prefixes=("RCON",),
+        description=(
+            "Estimated amount of uninsured deposits (RC-O item 2.a); reported "
+            "only by filers that state they have a method to estimate it"
+        ),
+    ),
+)
+
+# --------------------------------------------------------------------------
+# Schedule RC-C Part II -- loans to small businesses and small farms
+# --------------------------------------------------------------------------
+#
+# A separate schedule from Part I and a separate file in the bulk zip
+# (``RCCII``), and it is not a breakdown of the loan book by borrower type.
+# It is the same two loan categories Part I already reports, counted again in
+# **size buckets** by the original amount of the loan, which is the form's
+# proxy for a small business:
+#
+#   item 2   loans secured by nonfarm nonresidential properties
+#            5564/5565  number and balance, original amount <= $100,000
+#            5566/5567                                      $100,001 - $250,000
+#            5568/5569                                      $250,001 - $1,000,000
+#   item 3   commercial and industrial loans to U.S. addressees
+#            5570/5571, 5572/5573, 5574/5575, the same three buckets
+#
+# So the small-business balance is the sum of the three buckets, and the codes
+# alternate **count, balance, count, balance** down the schedule.  This is
+# where the labels have to be read rather than assumed: ``5572`` is
+# "NO OF LOANS > $100,000 THRU $250,000" -- a *number of loans*, not an amount
+# -- and mapping it as a balance would put a four-figure loan count through
+# ``UNIT_SCALE`` and report it as millions of dollars.  Only the balance codes
+# are mapped here; the counts are deliberately absent, because there is no
+# column in this panel that a count belongs in.
+#
+# Items 4-7 (5578-5589) are the small-farm equivalents, on $500,000 buckets.
+# They are left out: no firm in this universe has an agricultural book worth a
+# column, and ``loans_agricultural`` in Part I already carries what there is.
+#
+# Both lines are subsets of Part I categories rather than a partition of
+# anything, so they are checked as bounds and not as a sum -- see
+# ``BOUND_CHECKS``.  Measured over the universe's own charters, neither
+# exceeds its Part I parent in any quarter of the window: 0 violations against
+# 807 charters reporting small-business C&I at 2001Q2 and 34 at 2026Q2.
+
+RCCII_ITEMS: tuple[ItemSpec, ...] = (
+    ItemSpec(
+        "loans_small_business_ci",
+        "RCCII",
+        ("5571", "5573", "5575"),
+        prefixes=("RCON",),
+        description=(
+            "C&I loans to U.S. addressees with original amounts of $1 million "
+            "or less: the three size buckets of RC-C Part II item 3, summed"
+        ),
+    ),
+    ItemSpec(
+        "loans_small_business_cre",
+        "RCCII",
+        ("5565", "5567", "5569"),
+        prefixes=("RCON",),
+        description=(
+            "Loans secured by nonfarm nonresidential properties with original "
+            "amounts of $1 million or less: RC-C Part II item 2, summed"
+        ),
+    ),
 )
 
 # --------------------------------------------------------------------------
@@ -840,6 +968,8 @@ ALL_ITEMS: tuple[ItemSpec, ...] = (
     RCC_TOTAL,
     RCC_UNEARNED,
     *RC_ITEMS,
+    *RCO_ITEMS,
+    *RCCII_ITEMS,
     *RCL_ITEMS,
     *RCN_TOTALS,
     *RCN_BY_CATEGORY,
@@ -913,6 +1043,60 @@ PARTITION_CHECKS: tuple[PartitionCheck, ...] = (
     PartitionCheck("rcn_dpd_30_89_partition", RCN_TOTAL_COMPONENTS["pd_dpd_30_89"], "pd_dpd_30_89"),
     PartitionCheck("rcn_dpd_90_plus_partition", RCN_TOTAL_COMPONENTS["pd_dpd_90_plus"], "pd_dpd_90_plus"),
 )
+
+
+@dataclass(frozen=True)
+class BoundCheck:
+    """A column that must not exceed another, with no identity between them.
+
+    :class:`PartitionCheck` is the stronger statement and the one to prefer:
+    the schedule states a total, the parts must reproduce it, and a failure
+    means the mapping is wrong.  Some items have no such total to check
+    against and are still checkable, because the form guarantees an
+    *inequality* -- a subset cannot exceed the set it is drawn from.
+
+    The three new schedules are all of this kind.  RC-C Part II counts a slice
+    of two RC-C Part I categories in size buckets and states no total of its
+    own, so ``loans_small_business_ci <= loans_ci`` is everything the form
+    promises; RC-O's uninsured estimate is a part of total deposits and the
+    form states no split.  Asserting equality would be wrong, and asserting
+    nothing would leave three new columns with no check on them at all.
+
+    These are guard rails rather than evidence.  All three hold on every one
+    of the 3,676 bank-quarters, and a check that has never fired has not
+    proved anything: what it catches is a *future* mis-mapping that lets a
+    subset grow past the set it is drawn from, which is the shape every RC-C
+    rollup trap has taken.  What established these three mappings was the
+    schedule's own label row, read per code -- and the bound check is blind to
+    the error that mattered most here, since RC-C Part II's alternating count
+    and balance columns are both far smaller than the parent category, so a
+    loan *count* read as a balance sails straight through a bound.
+    """
+
+    name: str
+    part: str
+    whole: str
+    # Tolerance as a share of ``whole``, for the filer's own rounding.
+    tolerance: float = 1e-4
+
+
+BOUND_CHECKS: tuple[BoundCheck, ...] = (
+    BoundCheck("small_business_ci_within_ci", "loans_small_business_ci", "loans_ci"),
+    BoundCheck(
+        "small_business_cre_within_nonfarm_nonres",
+        "loans_small_business_cre",
+        "loans_cre_nonfarm_nonres",
+    ),
+    BoundCheck("uninsured_within_deposits", "deposits_uninsured", "deposits"),
+    # RC-K's averages are averages of the same books the balance sheet reports
+    # at a point in time, so no exact relation holds between them and nothing
+    # here checks one.  They are covered instead by the span measurement in
+    # ``tests/test_callrpt.py``.
+)
+
+
+def bound_checks() -> tuple[BoundCheck, ...]:
+    return BOUND_CHECKS
 
 
 def partition_checks() -> tuple[PartitionCheck, ...]:

@@ -240,6 +240,25 @@ def flags(frame: pl.DataFrame) -> pl.DataFrame:
                 const("negative total loans"),
             )
         )
+    # A subset that exceeds the set it is drawn from.  These schedules state no
+    # total of their own, so an inequality is the whole of what the form
+    # guarantees -- see ``mdrm.BoundCheck``.  Each one fails loudly under the
+    # mapping the MDRM codes' names suggest, which is how RC-C Part II's
+    # alternating count and balance columns were told apart.
+    for bound in mdrm.bound_checks():
+        if {bound.part, bound.whole} <= have:
+            checks.append(
+                (
+                    bound.name,
+                    pl.col(bound.part)
+                    > pl.col(bound.whole) * (1 + bound.tolerance),
+                    pl.format(
+                        "{} exceeds {}",
+                        const(bound.part),
+                        const(bound.whole),
+                    ),
+                )
+            )
     # --- synthetic history -------------------------------------------------
     if {"has_predecessor", "predecessor_count", "predecessors"} <= have:
         checks.append(
@@ -439,6 +458,15 @@ def main(argv: list[str] | None = None) -> int:
         help="sum only each firm's own 2026 RSSD subtree, as the 2013 build did",
     )
     ap.add_argument(
+        "--tfr",
+        action="store_true",
+        help=(
+            "fold in FDIC BankFind history for the insured depositories that "
+            "filed a Thrift Financial Report rather than a Call Report; reads "
+            "only what fetch_call.py --tfr has cached"
+        ),
+    )
+    ap.add_argument(
         "--baseline",
         choices=("previous", "own-2013", "none"),
         default="own-2013",
@@ -507,7 +535,26 @@ def main(argv: list[str] | None = None) -> int:
             holdings, quarter_ends, floor=cdr.quarter_end(periods[0]).replace(month=1, day=1), filers=filers
         )
 
-    charters, holding_panel = panel.build(periods, holdings, lineages=lineages)
+    # The thrift backfill needs to know which depositories are missing, and
+    # that is a property of a built panel.  So the first pass is built without
+    # it, the gap is read off that, and the panel is rebuilt with the history
+    # folded in.  Only the cache is read here -- ``fetch_call.py --tfr`` is
+    # what goes to the network.
+    tfr_frame, tfr_info = None, None
+    if args.tfr:
+        from callrpt_db import tfr as tfr_mod
+
+        # ``unfiled_depositories`` is where ``insured_not_filing`` comes from,
+        # so it is asked directly rather than by building the panel twice to
+        # read the column back off it.
+        gap = panel.unfiled_depositories(periods, holdings, lineages)
+        tfr_frame, tfr_info = tfr_mod.backfill(gap, periods, cached_only=True)
+        if tfr_frame.is_empty():
+            log.warning("--tfr: nothing cached; run fetch_call.py --tfr first")
+
+    charters, holding_panel = panel.build(
+        periods, holdings, lineages=lineages, tfr_frame=tfr_frame
+    )
     if holding_panel.is_empty():
         log.error("the build produced no rows")
         return 1
@@ -661,6 +708,18 @@ def main(argv: list[str] | None = None) -> int:
         "comparators": bool(args.comparators),
         "tickers": args.tickers or None,
         "lineage": lineage_summary if lineages is not None else "disabled (--no-lineage)",
+        # The thrift gap, and what closing it took.  Recorded whether or not
+        # ``--tfr`` ran, because "this panel does not carry the thrifts" is
+        # the finding a reader of the 2001-2011 rows most needs to know.
+        "thrift_gap": tfr_info
+        if tfr_info is not None
+        else {
+            "status": "not attempted (--tfr not given)",
+            "effect": (
+                "insured depositories that filed a Thrift Financial Report "
+                "contribute nothing; see n_insured_not_filing per bank-quarter"
+            ),
+        },
         "coverage_delta": {
             "bank_quarters_before": int(delta["quarters_before"].sum()) if not delta.is_empty() else None,
             "bank_quarters_after": int(delta["quarters_after"].sum()) if not delta.is_empty() else None,

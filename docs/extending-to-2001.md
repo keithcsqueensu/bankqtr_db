@@ -124,6 +124,101 @@ the events that restate year-to-date flows (below).
   that ever filed a Call Report as its definition of "is a depository", and
   the lineage file names such entities from the Call Report roster.
 
+## Closing the thrift gap
+
+The bullet above is what the panel does without `--tfr`. With it, the gap is
+closed from a second source, and the finding that made that possible is worth
+stating plainly: **the TFR data exists** — it is only the FFIEC bulk files
+that are Call-Report-only. The FDIC compiles its own quarterly series from
+whichever report an insured institution filed and publishes it on one schema
+through BankFind, so an OTS thrift's 2001–2011 history is there, mapped into
+common fields.
+
+```bash
+uv run python scripts/build_call_panel.py                 # measures the gap
+uv run python scripts/fetch_call.py --tfr                 # fetches it
+uv run python scripts/build_call_panel.py --tfr           # folds it in
+```
+
+Three steps, because which institutions are missing is a property of the panel
+— it depends on the lineages — and because fetching and building stay separate
+here as everywhere else: `build_call_panel --tfr` reads only the cache.
+
+`callrpt_db/tfr.py` does the work. 69 of the 69 non-filing depositories in
+this universe's lineages resolve, for 2,524 quarterly rows over 2001–2012,
+with every mapped field populated on 100% of them.
+
+### What it changes
+
+| | Without | With |
+|---|---:|---:|
+| bank-quarters | 3,676 | 3,741 |
+| charter-quarters | 30,802 | 32,244 |
+| JPMorgan 2008Q3 loan growth | +44.2% | −2.0% |
+
+The JPMorgan line is the whole point. Washington Mutual arrives as a $307bn
+bank with $241bn of loans at 2008Q2 and nonaccruals running 2.9 → 9.7 $bn
+through 2007–2008, so the step at the acquisition date becomes an ordinary
+quarter and the deterioration that preceded it is in the panel rather than
+absent from it.
+
+### The two joins, and how each was established
+
+**RSSD to certificate, not name to name.** BankFind's institution record
+carries `FED_RSSD`; NIC's entity record carries `fdic_cert`. Every one of the
+69 has a certificate in NIC, so the bridge is an identifier each registry
+collects independently — the same standard `resolve_rssd` holds the EIN bridge
+to, and for the same reason: a name match is weaker and there is more than one
+"Citizens Financial".
+
+**Field to column, by arithmetic.** BankFind's names do not say what they
+mean, and two pairs are the same trap RC-N sprang when F180 was read as F182.
+Three identities settle them, and `tfr.check_identities` measures them on
+every build rather than asserting them, so a change in what BankFind publishes
+shows up as a falling ratio instead of as silently different numbers:
+
+| Identity | Settles | Held |
+|---|---|---:|
+| `LNLSGR − LNATRES == LNLSNET` | `loans_total` is gross, not net of the allowance | 2,524 / 2,524 |
+| `NALNLS + P9ASSET == NCLNLS` | `nonaccrual_total` is nonaccrual **loans**, not assets | 2,517 / 2,524 |
+| `DRLNLS − CRLNLS == NTLNLS` | charge-offs and recoveries, not the net figure | 2,524 / 2,524 |
+
+The third is not a nicety. `panel.with_nco` builds NCO as gross charge-offs
+less recoveries, so a net figure mapped to `nco_total` would be overwritten by
+that subtraction, and one mapped to `charge_offs_total` would understate the
+gross line by the whole recovery rate. Both sides are mapped instead, and both
+are in `mdrm.FLOW_COLUMNS`, so `quarterize` differences them per charter and
+before the rollup exactly as it does the Call Report's own year-to-date flows.
+
+### What it deliberately does not do
+
+- **It is not a Call Report, and it costs the partition check on those rows.**
+  Backfilled rows carry `source = "tfr"` at charter level and populate
+  fourteen columns and no others. The TFR's loan breakdown does not partition
+  the way RC-C does, so a bank-quarter that includes one has loan categories
+  its RC-C total does not cover and `rcc_residual` reads as an over-count —
+  553 spurious `rcc_partition_over` flags, when it was computed anyway. It is
+  left null on those rows instead: 796 of 3,763, and M&T at 2003Q1, the one
+  genuine over-count in the panel, is among them because that row carries a
+  thrift too. The evidence survives a level down — the partition still runs
+  over all 30,802 Call Report charter-quarters and still ties for 29,249 — and
+  a build without `--tfr` keeps the holding-level check on every row. The
+  trade is the thrifts or the cross-foot, per bank-quarter.
+- **A charter that filed keeps its Call Report row.** The thrifts moved onto
+  the Call Report in 2012Q1, so the sources overlap at the boundary and the
+  filed report — the one on the panel's own form — wins.
+- **A thrift is attributed only to the quarters its organisation owned it.**
+  The mapping is `unfiled_depositories` expanded back into rows rather than a
+  second walk of the graph, so the backfill and the gap count cannot disagree
+  about who was missing whom. WaMu's own history runs from 2001; it becomes
+  JPMorgan's on 2008-09-25.
+- **`n_insured_not_filing` still counts what filed no Call Report.** That is
+  what the column means and a reader comparing builds should see the same
+  number; `n_tfr_backfilled` beside it says how much was recovered.
+- **Nine of the 69 do not resolve in `/institutions`** but do return
+  financials, so the count of institutions with a BankFind *record* and the
+  count with *data* are not the same number. The build info records both.
+
 ## What the panel carries for it
 
 Per bank-quarter: `has_predecessor`, `predecessor_count` (distinct

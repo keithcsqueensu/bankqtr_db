@@ -1447,3 +1447,574 @@ def test_a_submissions_shard_is_fetched_once_and_then_cached(
     assert first == second
     assert len(calls) == 1, "the second call must come from disk"
     assert (tmp_path / f"SUBSHARD_{name}.gz").exists()
+
+
+# ---- the HTML fallback's split-parenthesis trap --------------------------
+#
+# A filing typesets a negative as separate cells, so the opening parenthesis
+# arrives glued to the digits and the closer arrives alone.  ``_to_number``
+# only honoured a parenthesis when it saw both halves, so the fragment parsed
+# as *positive* -- a sign flip, not a parse failure, which is why nothing ever
+# raised.  4,799 cells across the 210 cached filings are split this way.
+
+
+@pytest.mark.parametrize(
+    ("cells", "expected"),
+    [
+        # Ally: the fragment, read_html's duplicate of it for the spanned
+        # column, then the closer alone.  Read as +1,423 before.
+        (["Charge-offs (a)", "nan", "(1,423", "(1,423", ")", "nan"], -1423.0),
+        # Goldman: the currency marker leaves a space where it was stripped,
+        # which defeated the parenthesis check even with both halves present --
+        # so this one came out None and the row was dropped entirely.
+        (["Allowance for loan losses", "nan", "$ (3,573", ")"], -3573.0),
+        # Northern Trust, with a decimal.
+        (["Net charge-offs (recoveries)", "(0.7", "(0.7", ")", "1.1"], -0.7),
+        # M&T, with the fragment not adjacent to the label.
+        (["Unearned discount", "nan", "(509,993", ")", "nan"], -509993.0),
+        # A positive number is untouched, duplicate and all.
+        (["Commercial real estate", "28110", "28110", "nan"], 28110.0),
+    ],
+)
+def test_a_parenthesised_negative_survives_being_split_across_cells(
+    cells: list[str], expected: float
+) -> None:
+    merged = html_fallback._merge_split_parens(cells)
+    assert html_fallback._first_numeric(merged) == expected
+
+
+def test_a_fragment_with_no_closer_is_left_alone() -> None:
+    """Reassembly is a repair, not a guess.  1.2% of fragments have no closer
+    to be found, and inventing one for them would be the same class of error
+    in the other direction."""
+    cells = html_fallback._merge_split_parens(["Something", "(47", "1,234"])
+    assert html_fallback._first_numeric(cells) == 47.0
+
+
+def test_a_number_does_not_absorb_a_parenthesis_from_another_column() -> None:
+    """Only padding, a currency marker or read_html's own duplicate may sit
+    between a fragment and its closer.  A real number in between means the two
+    belong to different columns."""
+    cells = html_fallback._merge_split_parens(["Provision", "(52", "981", ")"])
+    assert html_fallback._first_numeric(cells) == 52.0
+
+
+# ---- ...and the sign convention it exposed -------------------------------
+
+
+@pytest.mark.parametrize(
+    ("variable", "parsed", "expected"),
+    [
+        # A rollforward writes the closing allowance and the loan lines as
+        # deductions.  Carrying that into the panel makes a bank hold a
+        # negative reserve, so balances are magnitudes.
+        ("loans_lease", -5646.0, 5646.0),
+        ("acl_ending", -14407.0, 14407.0),
+        ("oreo", -2.0, 2.0),
+        ("pd_dpd_90_plus", -1.0, 1.0),
+        # Flows are left alone: a provision release and a net recovery are
+        # both real and both genuinely negative.
+        ("provision", -52.0, -52.0),
+        ("nco", -927.0, -927.0),
+        ("recoveries", -13.0, -13.0),
+    ],
+)
+def test_presentation_negatives_are_magnitudes_only_where_a_balance_cannot_be_negative(
+    variable: str, parsed: float, expected: float
+) -> None:
+    assert html_fallback._signed(variable, parsed) == expected
+
+
+def test_both_readers_share_one_sign_convention() -> None:
+    """``ir_extract`` had this rule and the HTML fallback did not, which went
+    unnoticed only because the split-parenthesis defect was cancelling it out.
+    One definition, on the lower layer, so the two cannot drift apart."""
+    from bankqtr_db import ir_extract
+
+    assert ir_extract._signed is html_fallback._signed
+
+
+# ---- the caption is what names a table ----------------------------------
+#
+# Every schedule in a credit disclosure lists the loan classes down the side,
+# so on body text alone a loan schedule, an unfunded-commitment table and a
+# business segment's balance sheet score identically.  What separates them is
+# the text printed above the table.
+
+
+def _table(rows: list[list[str]]):
+    import pandas as pd
+
+    return pd.DataFrame(rows)
+
+
+LOAN_ROWS = [
+    ["Commercial and industrial", "452068"],
+    ["Commercial real estate", "132284"],
+    ["Credit card", "59540"],
+    ["Total loans", "986167"],
+]
+
+
+def test_a_caption_counts_toward_classification() -> None:
+    spec = html_fallback.classify_table(
+        _table(LOAN_ROWS), "Table 16: Total Loans Outstanding by Portfolio Segment"
+    )
+    assert spec is not None and spec.name == "loan_portfolio"
+
+
+@pytest.mark.parametrize(
+    "caption",
+    [
+        # Wells Fargo's Table 3.4.  The rows are loan classes and the numbers
+        # are the lines available behind them, so credit card reads 180,563
+        # against a book of 59,540.
+        "Table 3.4: Unfunded Credit Commitments",
+        # US Bancorp's rate/volume analysis: the same row labels against the
+        # change in interest income, which read total loans as 549.
+        "Increase (decrease) in Interest Income",
+        # Average balances carry the period-end labels one block below them.
+        "Average Balance Sheets and Interest Yields/Rates",
+    ],
+)
+def test_a_table_that_is_not_a_balance_sheet_is_refused(caption: str) -> None:
+    assert html_fallback.classify_table(_table(LOAN_ROWS), caption) is None
+
+
+@pytest.mark.parametrize(
+    "caption",
+    [
+        # A segment repeats the consolidated labels over a fraction of the
+        # book, and is printed first.  Wells Fargo names the segment and never
+        # the word "segment".
+        "Table 9d: Commercial Banking - Balance Sheet",
+        "Table 9f: Corporate and Investment Banking - Balance Sheet",
+        "Consumer Banking and Lending - Balance Sheet",
+        "Results by reportable segment",
+    ],
+)
+def test_a_business_segment_schedule_is_refused(caption: str) -> None:
+    assert html_fallback.classify_table(_table(LOAN_ROWS), caption) is None
+
+
+def test_a_portfolio_segment_is_not_a_business_segment() -> None:
+    """The consolidated loan schedule is *named* after portfolio segments --
+    "Total Loans Outstanding by Portfolio Segment and Class of Financing
+    Receivable" -- so excluding on the bare word threw away the one table this
+    module most wants, and left Wells Fargo's C&I reading 157."""
+    spec = html_fallback.classify_table(
+        _table(LOAN_ROWS),
+        "Table 16: Total Loans Outstanding by Portfolio Segment and Class of "
+        "Financing Receivable",
+    )
+    assert spec is not None and spec.name == "loan_portfolio"
+
+
+def test_tables_are_paired_with_the_text_above_them() -> None:
+    html = b"""
+    <html><body>
+      <p>Table 11: Loan Portfolios</p>
+      <table><tr><td>Commercial and industrial</td><td>452068</td></tr>
+             <tr><td>Total loans</td><td>986167</td></tr></table>
+    </body></html>"""
+    tables = html_fallback.read_tables(html)
+    assert tables, "the document has a table"
+    _, caption = tables[0]
+    assert "Loan Portfolios" in caption
+
+
+# ---- which document gets parsed ------------------------------------------
+
+
+def test_the_ex13_is_recognised_as_the_statements(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wells Fargo, US Bancorp and BNY Mellon file a 10-K whose Item 8 points at
+    the annual report, and file the annual report as an EX-13 beside it.  All
+    21 of the cached filings that yield no table at all are these three banks,
+    and no parser can fix that -- the document being parsed does not contain
+    the numbers."""
+    from bankqtr_db import ir
+
+    monkeypatch.setattr(
+        ir,
+        "exhibit_index",
+        lambda folder, accn: [
+            ("wfc-1231x2025xex4c.htm", "", "EXHIBIT 4.C"),
+            ("wfc-20251231.htm", "EX-13", "EXHIBIT 13"),
+            ("wfc-1231x2025xex21.htm", "EX-21", "EXHIBIT 21"),
+        ],
+    )
+    filing = _filing()
+    assert html_fallback.financial_statement_exhibit(filing) == "wfc-20251231.htm"
+
+
+def test_a_filing_that_carries_its_own_statements_has_no_ex13(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate is self-limiting on purpose: EX-13 *is* the annual report, so a
+    filing that prints its statements inline has no such exhibit and the second
+    pass changes nothing for it."""
+    from bankqtr_db import ir
+
+    monkeypatch.setattr(
+        ir,
+        "exhibit_index",
+        lambda folder, accn: [("bac-20251231.htm", "", "10-K"), ("ex21.htm", "EX-21", "")],
+    )
+    assert html_fallback.financial_statement_exhibit(_filing()) is None
+
+
+def test_the_ex13_is_cached_beside_the_primary_document() -> None:
+    """A rebuild must not re-render or re-fetch; the two documents are kept
+    under distinct names so the 189 filings that already parse keep their
+    existing cache entries."""
+    filing = _filing()
+    primary = html_fallback._html_cache_path(filing)
+    exhibit = html_fallback._exhibit_cache_path(filing)
+    assert primary != exhibit
+    assert exhibit.name.endswith(".ex13.html.gz")
+    assert primary.parent == exhibit.parent
+
+
+def _filing():
+    import datetime as dt
+
+    from bankqtr_db.filings import Filing
+
+    return Filing(
+        bank="Wells Fargo",
+        ticker="WFC",
+        cik="0000072971",
+        accn="0000072971-26-000133",
+        form="10-K",
+        filing_date=dt.date(2026, 2, 20),
+        report_date=dt.date(2025, 12, 31),
+        primary_doc="wfc-20251231x10k.htm",
+    )
+
+
+# --------------------------------------------------------------------------
+# Grids: schedules addressed by column as well as by row
+# --------------------------------------------------------------------------
+#
+# Every case below is a reading that came out plausible and wrong while the
+# two grid specs were being measured against the 231 cached documents.  None
+# of them raises, and each one lands a number of the right magnitude in the
+# wrong column.
+
+# Bank of America's aging table, cut down to the columns that matter.  Note
+# the two headers that are *not* the 30-89 bucket and read as though they
+# were: the performing column names "30 days past due" inside a longer
+# phrase, and the rollup beside it is the sum of the three buckets.
+AGING_HEADER = [
+    "",
+    "30-59 days past due",
+    "60-89 days past due",
+    "90 days or more past due",
+    "Total past due 30 days or more",
+    "Total current or less than 30 days past due",
+    "Total outstandings",
+]
+AGING_ROWS = [
+    AGING_HEADER,
+    ["Residential mortgage", "667", "972", "1,639", "3,278", "225,205", "228,483"],
+    ["Commercial and industrial", "120", "40", "30", "190", "300,000", "300,190"],
+]
+
+
+def _aging_caption() -> str:
+    return "Age analysis of past due loans and leases at December 31, 2025"
+
+
+def test_a_grid_reads_the_column_not_the_left_most_number() -> None:
+    """The bucket is a column; ``_first_numeric`` would take the performing one.
+
+    This is the whole reason ``GridSpec`` exists.  A row-addressed spec
+    matching "residential mortgage" takes the left-most number in the row,
+    which in an aging table is whichever column the filer printed first.
+    """
+    spec = html_fallback.classify_grid(_table(AGING_ROWS), _aging_caption())
+    assert spec is html_fallback.DELINQUENCY_BY_CATEGORY
+
+    rows = html_fallback.extract_from_grid(
+        _table(AGING_ROWS), spec, _filing(), _aging_caption()
+    )
+    got = {r["variable"]: r["value"] for r in rows}
+    # 30-59 and 60-89 are separate columns here and are summed.
+    assert got["dpd_30_89_resi_mortgage"] == 667 + 972
+    assert got["dpd_90_plus_resi_mortgage"] == 1639
+
+
+def test_the_performing_column_is_not_read_as_a_delinquency() -> None:
+    """"Total current or less than 30 days past due" contains "30 days past due".
+
+    A looser column pattern matched it, and Bank of America's entire $225bn
+    residential book was reported as its 30-89 day delinquency against a real
+    1,639.  The magnitude is plausible for a balance and absurd for a bucket,
+    and nothing in the pipeline would have raised.
+    """
+    rows = html_fallback.extract_from_grid(
+        _table(AGING_ROWS),
+        html_fallback.DELINQUENCY_BY_CATEGORY,
+        _filing(),
+        _aging_caption(),
+    )
+    values = [r["value"] for r in rows]
+    assert 225205 not in values
+    assert 228483 not in values
+
+
+def test_the_past_due_rollup_column_is_not_added_to_its_own_parts() -> None:
+    """"Total past due 30 days or more" is 30-59 + 60-89 + 90+, already counted."""
+    rows = html_fallback.extract_from_grid(
+        _table(AGING_ROWS),
+        html_fallback.DELINQUENCY_BY_CATEGORY,
+        _filing(),
+        _aging_caption(),
+    )
+    got = {r["variable"]: r["value"] for r in rows}
+    assert got["dpd_30_89_resi_mortgage"] == 1639
+    assert 3278 not in [r["value"] for r in rows]
+
+
+def test_every_grid_column_may_be_created_by_the_merge() -> None:
+    """A column off ``HTML_NEW_COLUMNS`` is parsed, scaled, and then dropped.
+
+    ``fill_gaps`` creates an absent column only if the allowlist names it, and
+    nothing raises when it does not -- the reading simply never reaches the
+    panel, which looks identical to a filing that disclosed nothing. Both grid
+    specs populate columns no filing tags, so every one of them has to be
+    named there.
+    """
+    from bankqtr_db import reconcile
+
+    missing = set(html_fallback.grid_columns()) - set(reconcile.HTML_NEW_COLUMNS)
+    assert not missing
+
+
+def test_a_grid_column_is_bounded_by_the_loan_book() -> None:
+    """The check that caught leveraged lending at $1.18 trillion.
+
+    A past-due bucket and an origination-year balance are both slices of the
+    book, and both arrive under name prefixes none of the original entries in
+    ``_SUBSET_OF_LOANS`` covers -- so without adding them they would skip the
+    one guard written for columns with no XBRL counterpart to sanity-check
+    against.
+    """
+    from bankqtr_db import reconcile
+
+    for column in html_fallback.grid_columns():
+        assert column.startswith(reconcile._SUBSET_OF_LOANS), column
+
+
+def test_the_whole_book_row_is_not_read_as_the_lease_book() -> None:
+    """"Total loans and leases" contains "leases", and matched it first.
+
+    The same order-is-load-bearing trap ``ACL_ROLLFORWARD`` documents for
+    net-versus-gross charge-offs.  Bank of America's whole-book 30-89 figure
+    of 5,555 was reported as its lease delinquency, against a lease book a
+    fraction of that size -- and the total row is what the panel's own
+    ``pd_dpd_30_89`` column wants anyway.
+    """
+    rows = [
+        ["", "30-59 days past due", "60-89 days past due", "90 days or more past due"],
+        ["Lease financing", "10", "5", "2"],
+        ["Total loans and leases (7)", "3,000", "2,555", "3,819"],
+    ]
+    got = {
+        r["variable"]: r["value"]
+        for r in html_fallback.extract_from_grid(
+            _table(rows),
+            html_fallback.DELINQUENCY_BY_CATEGORY,
+            _filing(),
+            _aging_caption(),
+        )
+    }
+    assert got["pd_dpd_30_89"] == 5555
+    assert got["pd_dpd_90_plus"] == 3819
+    assert got["dpd_30_89_lease"] == 15
+
+
+def test_a_spanned_header_cell_counts_once_not_once_per_column() -> None:
+    """``read_html`` repeats a spanned cell across every column it covers.
+
+    Grouping the matched indices by the header's own text is what keeps the
+    single value under a three-column span from being added to itself.
+    """
+    rows = [
+        ["", "30-89 days past due", "30-89 days past due", "90 days or more"],
+        ["Commercial and industrial", "150", "150", "20"],
+    ]
+    got = {
+        r["variable"]: r["value"]
+        for r in html_fallback.extract_from_grid(
+            _table(rows),
+            html_fallback.DELINQUENCY_BY_CATEGORY,
+            _filing(),
+            _aging_caption(),
+        )
+    }
+    assert got["dpd_30_89_ci"] == 150
+
+
+def test_a_table_title_is_not_a_column_header() -> None:
+    """A banner spanned over the whole table matched the 90-day pattern.
+
+    Citizens' "Table 13: Nonaccrual loans and leases, accruing and 90 days or
+    more past due and restructured loans and leases" is one cell spanned over
+    thirty columns, so the bucket was mapped onto the entire width and every
+    row returned whichever number came first in it.  The table's columns are
+    years; it is not an aging schedule at all.
+    """
+    title = (
+        "Table 13: Nonaccrual loans and leases, accruing and 90 days or more "
+        "past due and restructured loans and leases"
+    )
+    rows = [
+        [title] * 5,
+        ["", "2025", "2024", "2023", "2022"],
+        ["Commercial and industrial", "280", "240", "210", "190"],
+    ]
+    columns = html_fallback._grid_columns(
+        _table(rows), html_fallback.DELINQUENCY_BY_CATEGORY
+    )
+    assert "dpd_90_plus" not in columns
+
+
+def test_a_tdr_aging_table_is_refused() -> None:
+    """The restructured book wears the same headings as the whole book.
+
+    Fifth Third's "Table 56: Accruing and nonaccruing portfolio TDRs" is laid
+    out identically -- loan classes down the side, buckets across the top --
+    over a population two orders of magnitude smaller.  ``EXCLUDE_LABEL``
+    cannot see it, because every row label in it is an ordinary loan class.
+    """
+    caption = "Table 56: Accruing and nonaccruing portfolio TDRs by loan type and delinquency status"
+    assert html_fallback.classify_grid(_table(AGING_ROWS), caption) is None
+
+
+# --- vintage -------------------------------------------------------------
+
+VINTAGE_ROWS = [
+    ["December 31, 2025", "2025", "2024", "2023", "2022", "2021", "Prior", "Total"],
+    ["Commercial and industrial:", "", "", "", "", "", "", ""],
+    ["Pass", "900", "800", "700", "600", "500", "400", "3,900"],
+    ["Special mention", "40", "30", "20", "10", "5", "5", "110"],
+    ["Substandard", "60", "20", "10", "10", "5", "5", "110"],
+    ["Total", "1,000", "850", "730", "620", "510", "410", "4,120"],
+    ["Commercial real estate:", "", "", "", "", "", "", ""],
+    ["Pass", "100", "90", "80", "70", "60", "50", "450"],
+    ["Special mention", "10", "5", "5", "5", "5", "5", "35"],
+    ["Substandard", "10", "5", "5", "5", "5", "5", "35"],
+    ["Total", "120", "100", "90", "80", "70", "60", "520"],
+]
+VINTAGE_CAPTION = (
+    "The following table presents the amortized cost basis of loans by "
+    "origination year and credit quality indicator"
+)
+
+
+def test_vintage_totals_are_built_from_the_grades_not_the_total_rows() -> None:
+    """Summing the rows labelled "total" double counts; the grades do not.
+
+    A vintage table states a nested set of totals -- "Total", "Total
+    commercial", "Total commercial and industrial" all appear in one table --
+    so adding the rows labelled "total" multiplies the book.  The grades
+    appear once per loan class, so they partition it.
+    """
+    spec = html_fallback.classify_grid(_table(VINTAGE_ROWS), VINTAGE_CAPTION)
+    assert spec is html_fallback.VINTAGE_ANALYSIS
+
+    got = {
+        r["variable"]: r["value"]
+        for r in html_fallback.extract_from_grid(
+            _table(VINTAGE_ROWS), spec, _filing(), VINTAGE_CAPTION
+        )
+    }
+    # 2025: C&I 900 + 40 + 60, CRE 100 + 10 + 10.  The "Total" rows carry
+    # 1,000 and 120 for the same year and must not be added on top.
+    assert got["vintage_total_2025"] == 1120
+    assert got["vintage_criticized_2025"] == 120
+    assert got["vintage_total_2024"] == 850 + 100
+
+
+def test_criticized_is_everything_that_is_not_pass() -> None:
+    """The ladder is not uniform across filers, so it is defined by exclusion.
+
+    Truist writes pass / special mention / substandard / nonperforming where
+    others write doubtful and loss.  Total less pass is the one definition
+    every filer's own table supports, and it keeps the total and the
+    criticised share describing the same population.
+    """
+    rows = [
+        ["December 31, 2025", "2025", "2024", "Total"],
+        ["Pass", "900", "800", "1,700"],
+        ["Nonperforming", "100", "50", "150"],
+    ]
+    got = {
+        r["variable"]: r["value"]
+        for r in html_fallback.extract_from_grid(
+            _table(rows), html_fallback.VINTAGE_ANALYSIS, _filing(), VINTAGE_CAPTION
+        )
+    }
+    assert got["vintage_criticized_2025"] == 100
+    assert got["vintage_total_2025"] == 1000
+
+
+def test_a_comparative_table_is_not_read_as_a_vintage_one() -> None:
+    """Ally's "December 31, | 2019 | 2018 | 2017" is three reporting periods.
+
+    115 of the 615 candidate tables measured are that shape.  A column reader
+    keyed on year headers reports them as three origination years, so the
+    caption has to name the disclosure before the table is read at all.
+    """
+    rows = [
+        ["December 31,", "2019", "2018", "2017"],
+        ["Pass", "900", "800", "700"],
+        ["Substandard", "40", "30", "20"],
+    ]
+    caption = "Finance receivables and loans at December 31, 2019 and 2018"
+    assert html_fallback.classify_grid(_table(rows), caption) is None
+
+
+def test_the_prior_year_grid_in_the_same_filing_is_skipped() -> None:
+    """A filing prints the grid twice, and "largest wins" picks the stale one.
+
+    An older vintage amortises *down*, so Truist's 2017 origination year is
+    780 in the 2020 table and 590 in the 2021 one.  The rule that settles
+    every other contest in this module picks 780 here, because 780 is
+    genuinely larger.  The header date is what separates them.
+    """
+    prior = [["December 31, 2024", "2024", "2023", "Total"]] + VINTAGE_ROWS[2:5]
+    filing = _filing()  # reports 2025-12-31
+    assert (
+        html_fallback.extract_from_grid(
+            _table(prior), html_fallback.VINTAGE_ANALYSIS, filing, VINTAGE_CAPTION
+        )
+        == []
+    )
+    # ...and the grid stated as of the filing's own period is kept.
+    assert html_fallback.extract_from_grid(
+        _table(VINTAGE_ROWS), html_fallback.VINTAGE_ANALYSIS, filing, VINTAGE_CAPTION
+    )
+
+
+def test_portfolio_segment_still_reaches_the_grid_reader() -> None:
+    """A *portfolio* segment is a loan class, not a business unit.
+
+    Excluding on the bare word once threw away the table this module most
+    wants; the grid reader inherits ``_SEGMENT_TABLE`` and must not regress
+    it.
+    """
+    caption = (
+        "Total loans outstanding by portfolio segment and class of financing "
+        "receivable, by origination year"
+    )
+    assert (
+        html_fallback.classify_grid(_table(VINTAGE_ROWS), caption)
+        is html_fallback.VINTAGE_ANALYSIS
+    )
+
+
+def test_a_business_segment_grid_is_still_refused() -> None:
+    caption = "Commercial Banking - past due status by origination year"
+    assert html_fallback.classify_grid(_table(VINTAGE_ROWS), caption) is None

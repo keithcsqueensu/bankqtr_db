@@ -1,0 +1,83 @@
+name: Pages
+
+# Published releases are what the download page is for: the panels it links to
+# are the ones cut for that release, so the site is rebuilt when one appears.
+# workflow_dispatch is kept for re-running the charts after a page or chart
+# change that is not itself a release.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and a queued run is not cancelled: cancelling a
+# half-finished Pages deployment can leave the site on a partial artifact.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install chart dependencies
+        run: python -m pip install --upgrade pip polars matplotlib numpy
+
+      - name: Generate charts and panel statistics
+        run: python scripts/generate_charts.py
+
+      # The page's download links are relative to the site root, and the site
+      # root is docs/.  The panels are committed at data/, so they are staged
+      # here rather than duplicated in the repository -- see .gitignore.
+      - name: Stage the panels into the site tree
+        run: |
+          mkdir -p docs/data
+          cp data/call_panel.parquet data/call_panel.csv docs/data/
+          cp data/panel.parquet      data/panel.csv      docs/data/
+          ls -lh docs/data
+
+      # A download page whose downloads 404 is worse than no page, and a
+      # renamed or unbuilt chart fails silently in an <img>.  Both are cheap to
+      # assert, so they are asserted before anything is published.
+      - name: Check every linked file is present
+        run: |
+          set -e
+          for f in \
+            docs/index.html \
+            docs/data_summary.json \
+            docs/data/call_panel.parquet docs/data/call_panel.csv \
+            docs/data/panel.parquet docs/data/panel.csv \
+            docs/charts/nco_timeseries.png \
+            docs/charts/peer_comparison.png \
+            docs/charts/portfolio_mix.png \
+            docs/charts/coverage_heatmap.png
+          do
+            test -s "$f" || { echo "missing or empty: $f"; exit 1; }
+            echo "ok  $f"
+          done
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

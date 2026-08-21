@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bankqtr_db — bank-quarter panels</title>
+<meta name="description" content="Quarterly bank panel data for peer benchmarking, built from FFIEC Call Reports and SEC EDGAR.">
+<style>
+  :root {
+    --ink:      #14181d;
+    --body:     #333a44;
+    --muted:    #667080;
+    --line:     #dfe3e9;
+    --line-2:   #eef1f5;
+    --bg:       #ffffff;
+    --panel:    #f7f9fb;
+    --accent:   #1f4e79;
+    --accent-2: #17395a;
+    --warn-bg:  #fdf6e7;
+    --warn-br:  #e8d59b;
+    --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--body);
+    font: 15px/1.55 var(--sans);
+    font-feature-settings: "tnum" 1;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 28px 72px; }
+
+  /* ---------- header ---------- */
+  header { border-bottom: 1px solid var(--line); margin-bottom: 34px; }
+  .head-inner {
+    max-width: 1180px; margin: 0 auto; padding: 30px 28px 24px;
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; flex-wrap: wrap;
+  }
+  h1 { margin: 0 0 6px; font-size: 22px; line-height: 1.25; color: var(--ink); font-weight: 650; letter-spacing: -0.01em; }
+  h1 .mono { font-family: var(--mono); font-size: 21px; }
+  .tagline { margin: 0; color: var(--muted); font-size: 14px; max-width: 74ch; }
+  .badges { display: flex; gap: 8px; align-items: center; flex-shrink: 0; padding-top: 3px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 7px;
+    border: 1px solid var(--line); border-radius: 4px; background: var(--panel);
+    padding: 5px 10px; font-family: var(--mono); font-size: 12px; color: var(--ink); white-space: nowrap;
+  }
+  .badge b { font-weight: 600; color: var(--accent); }
+  .badge .k { color: var(--muted); font-weight: 400; }
+  a { color: var(--accent); }
+
+  /* ---------- panels ---------- */
+  .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+  .panel {
+    border: 1px solid var(--line); border-radius: 6px; background: var(--bg);
+    display: flex; flex-direction: column;
+  }
+  /* The two panels' descriptions are different lengths, so one head wraps to a
+     second line and the other does not. Left alone, that pushes the whole
+     right-hand column down by a line: the stat rows stop lining up across the
+     two panels and the download buttons sit at different heights. Subgrid ties
+     the three bands to shared rows so head, stats and buttons align whatever
+     the text does. Browsers without it fall back to the flex column above,
+     which is today's behaviour rather than a broken one. */
+  @supports (grid-template-rows: subgrid) {
+    .grid-2 { grid-template-rows: auto 1fr auto; }
+    .panel { display: grid; grid-row: span 3; grid-template-rows: subgrid; }
+  }
+  .panel-head { padding: 16px 20px 14px; border-bottom: 1px solid var(--line-2); }
+  .panel-head h2 { margin: 0 0 3px; font-size: 15.5px; color: var(--ink); font-weight: 640; }
+  .panel-head .src { margin: 0; font-size: 12.5px; color: var(--muted); }
+  .panel-body { padding: 4px 20px 0; flex: 1 0 auto; }
+
+  table.stats { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  table.stats th, table.stats td { padding: 8px 0; border-bottom: 1px solid var(--line-2); text-align: left; }
+  table.stats th { font-weight: 400; color: var(--muted); width: 44%; }
+  table.stats td { font-family: var(--mono); color: var(--ink); text-align: right; font-size: 13px; }
+  table.stats tr:last-child th, table.stats tr:last-child td { border-bottom: 0; }
+
+  .dl { display: flex; gap: 10px; padding: 16px 20px 18px; }
+  .btn {
+    flex: 1; display: flex; flex-direction: column; gap: 2px; align-items: center;
+    padding: 9px 12px; border-radius: 4px; text-decoration: none;
+    font-size: 13.5px; font-weight: 600; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; transition: background .12s ease;
+  }
+  .btn:hover { background: var(--accent-2); }
+  .btn.alt { background: var(--bg); color: var(--accent); }
+  .btn.alt:hover { background: var(--panel); }
+  .btn .sz { font-family: var(--mono); font-size: 11px; font-weight: 400; opacity: .82; }
+
+  /* ---------- prose ---------- */
+  h3.section {
+    margin: 40px 0 14px; font-size: 12px; font-weight: 650; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .07em;
+    padding-bottom: 8px; border-bottom: 1px solid var(--line);
+  }
+  .note {
+    border: 1px solid var(--warn-br); background: var(--warn-bg);
+    border-radius: 5px; padding: 13px 16px; font-size: 13.5px; color: #5b4a1e;
+  }
+  .note b { color: #4a3c15; }
+  .cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 34px; font-size: 13.5px; }
+  .cols p { margin: 0 0 10px; }
+  .cols h4 { margin: 0 0 6px; font-size: 13.5px; color: var(--ink); font-weight: 640; }
+  code, .mono { font-family: var(--mono); }
+  code { font-size: 12.5px; background: var(--panel); border: 1px solid var(--line-2); border-radius: 3px; padding: 1px 5px; }
+
+  /* ---------- charts ---------- */
+  /* One column, one width. Four figures of different aspect ratios in a
+     multi-column grid is where ragged edges come from. */
+  .figs { display: grid; grid-template-columns: minmax(0, 1fr); gap: 22px; }
+  figure { margin: 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--bg); }
+  figure img { display: block; width: 100%; height: auto; }
+  figcaption {
+    padding: 11px 16px; border-top: 1px solid var(--line-2); background: var(--panel);
+    font-size: 12.5px; color: var(--muted);
+  }
+  figcaption b { color: var(--ink); font-weight: 600; }
+
+  footer {
+    margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--line);
+    font-size: 12.5px; color: var(--muted); display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  }
+  @media (max-width: 780px) {
+    .grid-2, .cols { grid-template-columns: minmax(0, 1fr); }
+    .head-inner { padding: 24px 20px 20px; }
+    .wrap { padding: 0 20px 56px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="head-inner">
+    <div>
+      <h1><span class="mono">bankqtr_db</span> — bank-quarter panels</h1>
+      <p class="tagline">
+        Quarterly panel data for US bank peer benchmarking, built twice from two
+        independent sources. One row per bank-quarter, one column per variable.
+      </p>
+    </div>
+    <div class="badges">
+      <span class="badge"><span class="k">release</span> <b id="version">…</b></span>
+      <span class="badge"><span class="k">built</span> <b id="built">…</b></span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <h3 class="section" style="margin-top:0">Downloads</h3>
+
+  <div class="grid-2">
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>FFIEC Call Report panel</h2>
+        <p class="src">Bank charters rolled up to the holding company, through each firm&rsquo;s predecessors.</p>
+      </div>
+      <div class="panel-body">
+        <table class="stats">
+          <tr><th>Bank-quarters</th><td id="ffiec-rows">—</td></tr>
+          <tr><th>Columns</th><td id="ffiec-cols">—</td></tr>
+          <tr><th>Firms</th><td id="ffiec-banks">—</td></tr>
+          <tr><th>Coverage</th><td id="ffiec-range">—</td></tr>
+        </table>
+      </div>
+      <div class="dl">
+        <a class="btn" href="data/call_panel.parquet" download>Parquet<span class="sz" id="ffiec-pq">—</span></a>
+        <a class="btn alt" href="data/call_panel.csv" download>CSV<span class="sz" id="ffiec-csv">—</span></a>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>EDGAR / IR panel</h2>
+        <p class="src">The consolidated holding company as it reports itself &mdash; XBRL, filing HTML, investor supplements.</p>
+      </div>
+      <div class="panel-body">
+        <table class="stats">
+          <tr><th>Bank-quarters</th><td id="edgar-rows">—</td></tr>
+          <tr><th>Columns</th><td id="edgar-cols">—</td></tr>
+          <tr><th>Firms</th><td id="edgar-banks">—</td></tr>
+          <tr><th>Coverage</th><td id="edgar-range">—</td></tr>
+        </table>
+      </div>
+      <div class="dl">
+        <a class="btn" href="data/panel.parquet" download>Parquet<span class="sz" id="edgar-pq">—</span></a>
+        <a class="btn alt" href="data/panel.csv" download>CSV<span class="sz" id="edgar-csv">—</span></a>
+      </div>
+    </section>
+
+  </div>
+
+  <h3 class="section">Which file do I want</h3>
+
+  <div class="cols">
+    <div>
+      <h4>Take the FFIEC panel if&hellip;</h4>
+      <p>
+        You need history. It reaches back to <b>2001Q1</b> &mdash; two full credit
+        cycles, including 2007&ndash;2009 &mdash; and each firm is carried through
+        its predecessors, so the 2007 rows are Wells Fargo <em>and</em> Wachovia,
+        PNC <em>and</em> National City.
+      </p>
+      <p>
+        You need categories that cross-foot. Schedule RC-C is a partition of a
+        total the form itself states, so the loan mix is an arithmetic identity
+        rather than an estimate. It also covers the US intermediate holding
+        companies of foreign banks, which file no 10-K at all.
+      </p>
+    </div>
+    <div>
+      <h4>Take the EDGAR panel if&hellip;</h4>
+      <p>
+        You need the <em>consolidated firm</em>. A Call Report is filed by a bank,
+        so the FFIEC rollup excludes the broker-dealer, the card funding trusts and
+        every non-bank lender. Ameriprise runs at 0.19&times; its 10-K loan book on
+        that basis; the median firm is 1.00&times;.
+      </p>
+      <p>
+        You need disclosure that exists nowhere on a regulatory form &mdash; office
+        CRE exposure, criticised/classified ladders, segment detail from investor
+        supplements. It starts at <b>2020Q1</b>.
+      </p>
+    </div>
+  </div>
+
+  <p style="margin:18px 0 0"><span class="note" style="display:block">
+    <b>They are not the same entity and are not expected to tie.</b>
+    <code>loans_ci</code> runs about 0.80&times; the 10-K&rsquo;s C&amp;I line and
+    <code>loans_cre_total</code> about 1.11&times; its CRE line, because RC-C puts
+    loans to nondepository financials and municipal obligations on their own lines
+    and folds owner-occupied property into CRE. Use one source or the other for a
+    mix comparison &mdash; not a mixture of the two.
+  </span></p>
+
+  <h3 class="section">Charts</h3>
+
+  <div class="figs">
+
+    <figure>
+      <img src="charts/nco_timeseries.png" alt="Net charge-off rate over time for all peer banks, with the GFC and COVID recessions shaded." loading="lazy">
+      <figcaption><b>Net charge-off rate, all peers.</b> Annualised, % of total loans, one hairline per bank with the cross-sectional median over them. NBER recessions shaded. The axis is capped so the peer distribution stays legible; the number of clipped points is printed on the chart.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="charts/peer_comparison.png" alt="Horizontal bar chart ranking banks by net charge-off rate in the latest quarter." loading="lazy">
+      <figcaption><b>Latest quarter, ranked.</b> Banks below the peer median are drawn lighter. A bank that has not filed the quarter is absent rather than shown at zero &mdash; an absence and a zero charge-off rate are different statements.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="charts/portfolio_mix.png" alt="Stacked area chart of the peer group's loan mix by quarter." loading="lazy">
+      <figcaption><b>Peer loan mix.</b> Dollar-weighted: summed balances over summed total loans, not the average of individual shares. Consumer is drawn net of cards and includes residential mortgage; the residual band is everything RC-C carries that the four named categories do not.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="charts/coverage_heatmap.png" alt="Heatmap of field coverage by bank, coloured red to green." loading="lazy">
+      <figcaption><b>Field coverage.</b> Share of each bank&rsquo;s own quarters carrying a value. Read it before building a screen. Most red is structural rather than a parsing failure &mdash; a custody bank has no card book, and <code>cet1_ratio</code> begins in 2015 when Basel III restructured Schedule RC-R.</figcaption>
+    </figure>
+
+  </div>
+
+  <h3 class="section">Before you use the charge-off rates</h3>
+
+  <p style="font-size:13.5px;margin:0 0 12px">
+    <code>nco_rate</code> is <code>nco_total / loans_total</code>, annualised
+    &times;4 and expressed in percent, where <code>nco_total</code> is gross
+    charge-offs less recoveries. Note the denominator is the <em>period-end</em>
+    balance, not average loans: the regulatory convention divides by average
+    loans, and <code>loans_average</code> is in the panel if you want to
+    recompute on that basis. The two differ by roughly 4% at the median.
+  </p>
+
+  <p style="margin:0"><span class="note" id="audit-note" style="display:block">
+    Every rate is checked against its own inputs before it is drawn.
+    <span id="audit-detail"></span>
+  </span></p>
+
+  <footer>
+    <div>
+      Built from FFIEC CDR bulk Call Reports, FFIEC NIC structure data, FDIC BankFind and SEC EDGAR.
+      Public filings; no redistribution restriction known.
+    </div>
+    <div>
+      <a href="https://github.com/keithcsqueensu/bankqtr_db">Source &amp; methodology</a>
+    </div>
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var REPO = "keithcsqueensu/bankqtr_db";
+
+  function text(id, value) {
+    var el = document.getElementById(id);
+    if (el) { el.textContent = value; }
+  }
+
+  function bytes(n) {
+    if (n === null || n === undefined) { return "—"; }
+    if (n >= 1048576) { return (n / 1048576).toFixed(1) + " MB"; }
+    return Math.max(1, Math.round(n / 1024)) + " kB";
+  }
+
+  function quarter(iso) {
+    // "2026-06-30" -> "2026Q2". Parsed by hand rather than via Date, which
+    // shifts an ISO date by the viewer's timezone and can move a quarter end
+    // back into the previous quarter.
+    var p = String(iso).split("-");
+    if (p.length < 2) { return String(iso); }
+    return p[0] + "Q" + Math.floor((parseInt(p[1], 10) - 1) / 3 + 1);
+  }
+
+  function fill(prefix, d) {
+    if (!d) { return; }
+    text(prefix + "-rows", d.rows.toLocaleString("en-US"));
+    text(prefix + "-cols", d.columns.toLocaleString("en-US"));
+    text(prefix + "-banks", d.banks.toLocaleString("en-US"));
+    text(prefix + "-range", quarter(d.start) + " – " + quarter(d.end));
+    text(prefix + "-pq", bytes(d.parquet_bytes));
+    text(prefix + "-csv", bytes(d.csv_bytes));
+  }
+
+  // Panel statistics, written by scripts/generate_charts.py from the very
+  // files linked above, so the page cannot describe a different build from the
+  // one it is offering.
+  fetch("data_summary.json", { cache: "no-cache" })
+    .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+    .then(function (d) {
+      fill("ffiec", d.ffiec);
+      fill("edgar", d.edgar);
+      if (d.generated_utc) { text("built", d.generated_utc.replace(" UTC", "")); }
+
+      var audits = d.rate_audit || [];
+      var flagged = 0, corrected = 0, nulled = 0;
+      audits.forEach(function (a) {
+        flagged += a.flagged || 0;
+        corrected += a.corrected || 0;
+        nulled += a.nulled || 0;
+      });
+      var parts = [
+        "Across " + audits.length + " rate columns, " + flagged +
+        " bank-quarters sat more than 10× above their own bank's median."
+      ];
+      parts.push(corrected === 0
+        ? "None disagreed with its own numerator and denominator, so none was rewritten."
+        : corrected + " disagreed with their own inputs and were recomputed.");
+      parts.push(nulled === 0
+        ? "None was discarded."
+        : nulled + " were discarded because the loan balance underneath them had collapsed — a rate is not meaningful against a book of $31,000 — and are logged for upstream investigation. The rest are 2008–2010 doing what it did, and are left alone.");
+      text("audit-detail", " " + parts.join(" "));
+    })
+    .catch(function () {
+      text("audit-detail",
+        " Detail unavailable — data_summary.json did not load.");
+    });
+
+  // Latest release. Unauthenticated and rate-limited by IP, so a failure here
+  // is expected occasionally and must not look like a broken page.
+  fetch("https://api.github.com/repos/" + REPO + "/releases/latest",
+        { headers: { Accept: "application/vnd.github+json" } })
+    .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+    .then(function (r) {
+      var el = document.getElementById("version");
+      el.textContent = r.tag_name || "—";
+      if (r.html_url) {
+        var a = document.createElement("a");
+        a.href = r.html_url;
+        a.textContent = r.tag_name;
+        a.style.textDecoration = "none";
+        el.textContent = "";
+        el.appendChild(a);
+      }
+    })
+    .catch(function () { text("version", "unavailable"); });
+})();
+</script>
+
+</body>
+</html>

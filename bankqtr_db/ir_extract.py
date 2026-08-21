@@ -80,7 +80,12 @@ import pandas as pd
 import polars as pl
 
 from . import parallel
-from .html_fallback import EXCLUDE_LABEL, _to_number
+from .html_fallback import (
+    EXCLUDE_LABEL,
+    _html_tables_with_context,
+    _signed,
+    _to_number,
+)
 from .ir import IRDoc
 
 log = logging.getLogger(__name__)
@@ -624,70 +629,6 @@ def _html_tables(payload: bytes) -> list[Table]:
     return []
 
 
-# How much of the text above a table is kept as its heading.  ``_CAPTION_CHARS``
-# is the stopping rule -- collecting ends as soon as this much text has been
-# gathered -- and ``_CONTEXT_CHARS`` trims whatever that last chunk dragged in.
-_CAPTION_CHARS = 60
-_CONTEXT_CHARS = 200
-
-
-def _html_tables_with_context(payload: bytes) -> list[Table]:
-    try:
-        from lxml import html as lxml_html
-    except ImportError:  # pragma: no cover
-        return []
-    try:
-        tree = lxml_html.fromstring(payload)
-    except Exception as exc:  # noqa: BLE001 - malformed markup is the norm
-        log.debug("lxml parse failed: %s", exc)
-        return []
-
-    out: list[Table] = []
-    for element in tree.iter("table"):
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                parsed = pd.read_html(
-                    BytesIO(lxml_html.tostring(element)), flavor="lxml"
-                )
-        except Exception as exc:  # noqa: BLE001 - a rejected table is skipped
-            log.debug("table read_html failed: %s", exc)
-            continue
-        if not parsed:
-            continue
-        out.append((parsed[0], _text_before(element)))
-    return out
-
-
-def _text_before(element: Any) -> str:
-    """The caption printed immediately above an element.
-
-    Deliberately short-sighted.  Reading back a fixed number of characters
-    walks straight off the top of the section and picks up the footnotes of the
-    page before -- which is how Wells Fargo's "COMMERCIAL LOAN PORTFOLIO" table
-    came to be captioned with the previous page's past-due commentary and was
-    classified as a nonperforming schedule.  Only the nearest heading is taken:
-    enough to name the schedule, not enough to reach the one before it.
-    """
-    chunks: list[str] = []
-    total = 0
-    node = element
-    while node is not None and total < _CAPTION_CHARS:
-        previous = node.getprevious()
-        while previous is not None and total < _CAPTION_CHARS:
-            # Skip other tables (their contents are not this table's heading)
-            # and comments/processing instructions, whose tag is a callable
-            # rather than a string and which carry no text content.
-            if isinstance(previous.tag, str) and previous.tag != "table":
-                text = " ".join(previous.text_content().split())
-                if text:
-                    chunks.insert(0, text)
-                    total += len(text)
-            previous = previous.getprevious()
-        node = node.getparent()
-    return " ".join(chunks)[-_CONTEXT_CHARS:]
-
-
 def _excel_tables(path: Path) -> list[Table]:
     try:
         sheets = pd.read_excel(path, sheet_name=None, header=None)
@@ -933,20 +874,6 @@ _PUNCTUATION_ONLY = re.compile(r"^[^\w]+$")
 # Longest a genuine row label runs to.  Anything longer is a heading or a
 # contents entry that happens to contain the words a row pattern looks for.
 _MAX_LABEL_CHARS = 90
-
-# Balances that cannot be negative in fact, only in presentation.  An allowance
-# rollforward writes the closing allowance and the charge-offs as deductions --
-# "(14,407)", "(876)" -- and carrying that sign into the panel makes a bank
-# look like it holds a negative reserve.  Flows are left alone: a provision
-# release and a net recovery are both real and both genuinely negative.
-_NON_NEGATIVE_PREFIXES = ("loans_", "acl_", "nonaccrual_", "cq_", "pd_")
-_NON_NEGATIVE_EXACT = ("oreo", "npa_total")
-
-
-def _signed(variable: str, value: float) -> float:
-    if variable in _NON_NEGATIVE_EXACT or variable.startswith(_NON_NEGATIVE_PREFIXES):
-        return abs(float(value))
-    return float(value)
 
 
 def row_label_and_value(row: pd.Series) -> tuple[str, float | None]:

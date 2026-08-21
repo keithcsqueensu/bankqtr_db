@@ -582,6 +582,403 @@ def test_ratio_definitions_are_shared_with_the_edgar_panel() -> None:
 # --------------------------------------------------------------------------
 
 
+
+# --------------------------------------------------------------------------
+# RC-O, RC-C Part II and the two RC-K averages
+# --------------------------------------------------------------------------
+
+
+def test_small_business_is_the_sum_of_its_size_buckets(tmp_path: Path) -> None:
+    """RC-C Part II reports one category across three original-amount buckets.
+
+    Taking only the first bucket -- the ``<= $100,000`` line -- reads a bank's
+    small-business C&I book as a third of itself, which is plausible next to
+    peers and wrong.
+    """
+    path = make_zip(
+        tmp_path,
+        "2025Q4",
+        {
+            "RCCII": {
+                852218: {
+                    "RCON5570": "12000",  # a loan *count*, not a balance
+                    "RCON5571": "1500000",
+                    "RCON5572": "8000",  # a loan count
+                    "RCON5573": "2500000",
+                    "RCON5574": "4000",  # a loan count
+                    "RCON5575": "3500000",
+                }
+            }
+        },
+    )
+    frame = resolve(path, mdrm.RCCII_ITEMS)
+    assert value(frame, 852218, "loans_small_business_ci") == 7_500_000 * 1_000
+
+
+def test_a_loan_count_is_never_read_as_a_balance() -> None:
+    """RC-C Part II alternates count, balance, count, balance down the schedule.
+
+    ``5572`` is "NO OF LOANS > $100,000 THRU $250,000" and ``5573`` is the
+    outstanding balance for that same bucket.  Mapping the count as a balance
+    puts a four-figure number of loans through ``UNIT_SCALE`` and reports it as
+    millions of dollars -- and, because a count is small, it stays well inside
+    any bound check and would never be flagged.
+    """
+    counts = {"RCON5570", "RCON5572", "RCON5574", "RCON5564", "RCON5566", "RCON5568"}
+    mapped = {
+        prefix + item
+        for spec in mdrm.RCCII_ITEMS
+        for item in spec.all_items()
+        for prefix in spec.prefixes
+    }
+    assert not (counts & mapped), "a number-of-loans item is mapped as a balance"
+
+
+def test_small_business_cre_is_the_nonfarm_nonresidential_bucket(
+    tmp_path: Path,
+) -> None:
+    path = make_zip(
+        tmp_path,
+        "2025Q4",
+        {
+            "RCCII": {
+                852218: {
+                    "RCON5565": "400000",
+                    "RCON5567": "600000",
+                    "RCON5569": "1000000",
+                }
+            }
+        },
+    )
+    frame = resolve(path, mdrm.RCCII_ITEMS)
+    assert value(frame, 852218, "loans_small_business_cre") == 2_000_000 * 1_000
+
+
+def test_uninsured_deposits_are_domestic_only(tmp_path: Path) -> None:
+    """There is no ``RCFD5597``: deposit insurance is a domestic concept.
+
+    Listing the consolidated prefix first would be harmless here and wrong in
+    principle; the spec names ``RCON`` alone so the item cannot pick up a
+    consolidated basis that does not exist.
+    """
+    assert mdrm.BY_NAME["deposits_uninsured"].prefixes == ("RCON",)
+    path = make_zip(
+        tmp_path, "2025Q4", {"RCO": {852218: {"RCON5597": "1151030000"}}}
+    )
+    frame = resolve(path, mdrm.RCO_ITEMS)
+    assert value(frame, 852218, "deposits_uninsured") == 1_151_030_000 * 1_000
+
+
+def test_an_unreported_uninsured_estimate_is_null_not_zero(tmp_path: Path) -> None:
+    """RC-O item 2.a is reported only by filers that have a method to estimate.
+
+    A bank that does not report it has not said its uninsured deposits are
+    nothing, and a zero would be read as exactly that -- the same
+    "not reported is not nothing" rule the rest of this module runs on.
+    """
+    path = make_zip(
+        tmp_path,
+        "2025Q4",
+        {
+            "RCO": {852218: {"RCON5597": "1000"}},
+            # A filer that reports its balance sheet and no estimate, which is
+            # the ordinary case: 18 of this universe's 64 charters at 2026Q2.
+            "RC": {852218: {"RCFDB528": "5000"}, 480228: {"RCFDB528": "3000"}},
+        },
+    )
+    frame = resolve(path, (*mdrm.RCO_ITEMS, mdrm.BY_NAME["loans_total"]))
+    assert value(frame, 480228, "loans_total") == 3_000 * 1_000
+    assert value(frame, 480228, "deposits_uninsured") is None
+
+
+def test_average_securities_sum_the_three_lines_rc_k_splits_them_into(
+    tmp_path: Path,
+) -> None:
+    """RC-K states no single average for the securities book.
+
+    ``3516`` and ``3517`` were looked for first, on the assumption that RC-K
+    carries an average-securities line; no schedule in any of the 102 bulk
+    files carries either code.  What it has is the three-way split.
+    """
+    path = make_zip(
+        tmp_path,
+        "2025Q4",
+        {
+            "RCK": {
+                852218: {
+                    "RCFDB558": "300000000",
+                    "RCFDB559": "250000000",
+                    "RCFDB560": "116215000",
+                    "RCFD3381": "500000000",
+                }
+            }
+        },
+    )
+    frame = resolve(path, (mdrm.BY_NAME["securities_average"], mdrm.BY_NAME["deposits_in_banks_average"]))
+    assert value(frame, 852218, "securities_average") == 666_215_000 * 1_000
+    assert value(frame, 852218, "deposits_in_banks_average") == 500_000_000 * 1_000
+
+
+def test_3516_and_3517_are_not_mapped_anywhere() -> None:
+    """They do not exist on the form; a mapping for them would silently be null."""
+    every = {item for spec in mdrm.ALL_ITEMS for item in spec.all_items()}
+    assert "3516" not in every
+    assert "3517" not in every
+
+
+def test_bound_checks_name_columns_that_exist() -> None:
+    """A bound check on a column no spec produces would never run at all."""
+    for bound in mdrm.bound_checks():
+        assert bound.part in mdrm.BY_NAME, bound.part
+        assert bound.whole in mdrm.BY_NAME or bound.whole in mdrm.DERIVED_LOAN_GROUPS
+
+
+def test_small_business_within_its_parent_category(tmp_path: Path) -> None:
+    """The bound the form guarantees, on a filer that satisfies it."""
+    path = make_zip(
+        tmp_path,
+        "2025Q4",
+        {
+            "RCCI": {852218: {"RCFD1763": "100000000", "RCFD1764": "20000000"}},
+            "RCCII": {
+                852218: {
+                    "RCON5571": "1000000",
+                    "RCON5573": "2000000",
+                    "RCON5575": "3000000",
+                }
+            },
+        },
+    )
+    frame = resolve(
+        path, (mdrm.BY_NAME["loans_ci"], mdrm.BY_NAME["loans_small_business_ci"])
+    )
+    assert value(frame, 852218, "loans_small_business_ci") < value(
+        frame, 852218, "loans_ci"
+    )
+
+
+# --------------------------------------------------------------------------
+# The thrift gap
+# --------------------------------------------------------------------------
+
+
+def test_tfr_maps_gross_loans_not_loans_net_of_the_allowance() -> None:
+    """``LNLSNET`` is ``LNLSGR`` less the allowance, and the panel wants gross.
+
+    The panel's ``loans_total`` is gross of the allowance, so mapping the net
+    line would understate every backfilled quarter by exactly the reserve --
+    a few per cent, in the direction that makes a failing thrift look better.
+    """
+    from callrpt_db import tfr
+
+    assert tfr.FIELDS["LNLSGR"] == "loans_total"
+    assert "LNLSNET" not in tfr.FIELDS
+    assert "LNLSNET" in tfr.CHECK_FIELDS
+
+
+def test_tfr_maps_nonaccrual_loans_not_nonaccrual_assets() -> None:
+    """``NAASSET`` and ``NALNLS`` are both "nonaccrual" and are not the same.
+
+    This is the BankFind form of the trap that put nonaccrual owner-occupied
+    CRE at $1m on the RC-N side, where F180 (90 days past due) was read as
+    F182 (nonaccrual).
+    """
+    from callrpt_db import tfr
+
+    assert tfr.FIELDS["NALNLS"] == "nonaccrual_total"
+    assert "NAASSET" not in tfr.FIELDS
+
+
+def test_tfr_maps_the_two_sides_of_the_charge_off_not_the_net_figure() -> None:
+    """``panel.with_nco`` builds NCO as charge-offs less recoveries.
+
+    Handing it a net figure under ``nco_total`` would be overwritten by that
+    subtraction; handing it one under ``charge_offs_total`` would misstate the
+    gross line by the whole recovery rate.
+    """
+    from callrpt_db import tfr
+
+    assert tfr.FIELDS["DRLNLS"] == "charge_offs_total"
+    assert tfr.FIELDS["CRLNLS"] == "recoveries_total"
+    assert "NTLNLS" not in tfr.FIELDS
+    # ...and both are flows, so ``quarterize`` differences them.
+    assert "charge_offs_total" in mdrm.FLOW_COLUMNS
+    assert "recoveries_total" in mdrm.FLOW_COLUMNS
+
+
+def test_tfr_identities_are_measured_not_asserted() -> None:
+    """The field mapping's evidence is arithmetic the rows themselves carry.
+
+    Washington Mutual at 2007Q4 is the case each identity was read off.
+    """
+    from callrpt_db import tfr
+
+    rows = [
+        {
+            "LNLSGR": 251_279_884,
+            "LNATRES": 2_569_945,
+            "LNLSNET": 248_709_939,
+            "NALNLS": 6_121_610,
+            "P9ASSET": 310_251,
+            "NCLNLS": 6_431_861,
+            "DRLNLS": 2_311_660,
+            "CRLNLS": 144_355,
+            "NTLNLS": 2_167_305,
+        }
+    ]
+    got = tfr.check_identities(rows)
+    assert got["gross_less_allowance_is_net"] == (1, 1)
+    assert got["noncurrent_is_nonaccrual_plus_90"] == (1, 1)
+    assert got["charge_offs_less_recoveries_is_net"] == (1, 1)
+
+
+def test_tfr_identity_failure_is_counted_rather_than_raised() -> None:
+    """A change in what BankFind publishes should show as a falling ratio."""
+    from callrpt_db import tfr
+
+    rows = [{"LNLSGR": 100, "LNATRES": 10, "LNLSNET": 55}]
+    assert tfr.check_identities(rows)["gross_less_allowance_is_net"] == (0, 1)
+
+
+def test_tfr_rows_are_in_thousands_like_the_call_report() -> None:
+    from callrpt_db import tfr
+
+    frame = tfr.frame(
+        [{"CERT": 32633, "REPDTE": "20080630", "ASSET": 307_021_614}],
+        {32633: 1222108},
+    )
+    assert frame.height == 1
+    assert frame["assets"][0] == 307_021_614 * 1_000
+    assert frame["rssd"][0] == 1222108
+    assert frame["source"][0] == "tfr"
+
+
+def test_a_cert_outside_the_universe_is_dropped() -> None:
+    """The join's whole point is that a row belongs to a named lineage."""
+    from callrpt_db import tfr
+
+    frame = tfr.frame([{"CERT": 99999, "REPDTE": "20080630", "ASSET": 1}], {32633: 1})
+    assert frame.is_empty()
+
+
+def test_a_charter_that_filed_keeps_its_call_report_row() -> None:
+    """The thrifts moved to the Call Report in 2012Q1, so the sources overlap.
+
+    Taking the TFR row for a quarter the charter actually filed would replace
+    a figure on the panel's own form with one mapped from another, and could
+    count the same bank twice.
+    """
+    charters = pl.DataFrame(
+        {
+            "rssd": [1222108],
+            "period": [dt.date(2012, 3, 31)],
+            "loans_total": [100.0],
+        }
+    )
+    mapping = pl.DataFrame(
+        {
+            "ticker": ["JPM"],
+            "bank": ["JPMorgan"],
+            "holding_rssd": [1039502],
+            "rssd": [1222108],
+            "period": [dt.date(2012, 3, 31)],
+            "via_rssd": [None],
+            "via_type": [None],
+            "failed_lineage": [False],
+        },
+        schema_overrides=panel.MAPPING_SCHEMA,
+    )
+    gaps = pl.DataFrame(
+        {
+            "ticker": ["JPM"],
+            "period": [dt.date(2012, 3, 31)],
+            "n_insured_not_filing": [1],
+            "insured_not_filing": ["1222108"],
+        }
+    )
+    tfr_frame = pl.DataFrame(
+        {
+            "rssd": [1222108],
+            "cert": [32633],
+            "period": [dt.date(2012, 3, 31)],
+            "source": ["tfr"],
+            "loans_total": [999.0],
+        }
+    )
+    combined, _mapped, added = panel.merge_tfr(charters, mapping, gaps, tfr_frame)
+    assert added == 0
+    assert combined["loans_total"].to_list() == [100.0]
+
+
+def test_the_partition_check_is_suppressed_where_thrift_history_was_added() -> None:
+    """A backfilled row has loan categories its RC-C total does not cover.
+
+    The FDIC series supplies four loan categories and no Schedule RC-C, so the
+    leaves include the thrift's book while ``loans_rcc_total`` sums only the
+    Call Report filers, and the residual reads as an *over*-count — the sign
+    this check reserves for a mapping bug. Computing it anyway raised
+    ``rcc_partition_over`` on 553 bank-quarters with nothing wrong with them.
+    """
+    frame = pl.DataFrame(
+        {
+            "loans_ci": [50.0, 50.0],
+            "loans_rcc_total": [40.0, 40.0],
+            "n_tfr_backfilled": [0, 1],
+        }
+    )
+    got = panel.add_partition_check(frame)
+    assert got["rcc_residual"][0] == 10.0  # checkable, and over: a real flag
+    assert got["rcc_residual"][1] is None  # not checkable, so not claimed
+
+
+def test_the_partition_check_survives_where_no_thrift_was_added() -> None:
+    """A build without ``--tfr`` keeps the holding-level check on every row."""
+    frame = pl.DataFrame({"loans_ci": [50.0], "loans_rcc_total": [40.0]})
+    assert panel.add_partition_check(frame)["rcc_residual"][0] == 10.0
+
+
+def test_a_thrift_is_not_attributed_to_a_firm_that_did_not_own_it() -> None:
+    """Only the quarters ``unfiled_depositories`` places it in the organisation.
+
+    Washington Mutual's own history runs from 2001; it became JPMorgan's on
+    2008-09-25.  A backfill that attached the whole series to JPMorgan would
+    put a $300bn bank inside it seven years early.
+    """
+    charters = pl.DataFrame(schema={"rssd": pl.Int64, "period": pl.Date})
+    mapping = pl.DataFrame(
+        {
+            "ticker": ["JPM"],
+            "bank": ["JPMorgan"],
+            "holding_rssd": [1039502],
+            "rssd": [852218],
+            "period": [dt.date(2003, 3, 31)],
+            "via_rssd": [None],
+            "via_type": [None],
+            "failed_lineage": [False],
+        },
+        schema_overrides=panel.MAPPING_SCHEMA,
+    )
+    # The gap file says nothing about 2003: WaMu was not JPMorgan's then.
+    gaps = pl.DataFrame(
+        schema={
+            "ticker": pl.Utf8,
+            "period": pl.Date,
+            "n_insured_not_filing": pl.Int64,
+            "insured_not_filing": pl.Utf8,
+        }
+    )
+    tfr_frame = pl.DataFrame(
+        {
+            "rssd": [1222108],
+            "cert": [32633],
+            "period": [dt.date(2003, 3, 31)],
+            "source": ["tfr"],
+            "loans_total": [1.0],
+        }
+    )
+    _combined, _mapped, added = panel.merge_tfr(charters, mapping, gaps, tfr_frame)
+    assert added == 0
+
 def _cached() -> list[str]:
     return cdr.cached_periods()
 

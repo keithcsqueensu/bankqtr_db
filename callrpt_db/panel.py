@@ -313,6 +313,102 @@ def unfiled_depositories(
     )
 
 
+def tfr_mapping(gaps: pl.DataFrame, mapping: pl.DataFrame) -> pl.DataFrame:
+    """One :data:`MAPPING_SCHEMA` row per non-filing depository per quarter.
+
+    :func:`unfiled_depositories` already knows which insured depositories sat
+    in each organisation's tree without filing anything CDR holds, and which
+    quarters.  That is exactly the set :mod:`callrpt_db.tfr` fetches, so the
+    mapping the rollup needs is that column expanded back into rows rather
+    than a second walk of the graph -- the two cannot then disagree about who
+    is missing.
+
+    ``via_type`` is ``tfr`` rather than a succession type.  These charters are
+    not predecessors reached through a merger; they are members of the
+    organisation as the graph already has it, whose *reports* were somewhere
+    else.  Naming the route keeps them filterable, and keeps them out of the
+    predecessor counts, which mean something different.
+    """
+    if gaps.is_empty():
+        return pl.DataFrame(schema=MAPPING_SCHEMA)
+    names = (
+        mapping.select("ticker", "bank", "holding_rssd").unique(subset=["ticker"])
+        if not mapping.is_empty()
+        else pl.DataFrame(schema={"ticker": pl.Utf8, "bank": pl.Utf8, "holding_rssd": pl.Int64})
+    )
+    expanded = (
+        gaps.filter(pl.col("insured_not_filing").is_not_null())
+        .with_columns(pl.col("insured_not_filing").str.split(";").alias("rssd"))
+        # A holding with an empty list must not become a null row; the filter
+        # below wants a string to reject, not a null to carry through.
+        .explode("rssd", empty_as_null=False)
+        .filter(pl.col("rssd").str.len_chars() > 0)
+        .with_columns(pl.col("rssd").cast(pl.Int64))
+        .join(names, on="ticker", how="left")
+    )
+    return expanded.select(
+        pl.col("ticker"),
+        pl.col("bank"),
+        pl.col("holding_rssd"),
+        pl.col("rssd"),
+        pl.col("period"),
+        pl.lit(None, dtype=pl.Int64).alias("via_rssd"),
+        pl.lit("tfr", dtype=pl.Utf8).alias("via_type"),
+        pl.lit(False, dtype=pl.Boolean).alias("failed_lineage"),
+    ).unique()
+
+
+def merge_tfr(
+    charters: pl.DataFrame,
+    mapping: pl.DataFrame,
+    gaps: pl.DataFrame,
+    tfr_frame: pl.DataFrame,
+) -> tuple[pl.DataFrame, pl.DataFrame, int]:
+    """Fold TFR charter-quarters into the charter frame and its mapping.
+
+    Returns ``(charters, mapping, n_rows_added)``.
+
+    Two rules, both of which exist to keep the panel from counting a bank
+    twice.  A charter that **did** file for a quarter keeps its Call Report
+    row and the TFR row for it is dropped -- the thrifts changed regulator in
+    2012Q1 and start appearing in CDR, so the two sources genuinely overlap at
+    the boundary and the filed report is the one on the panel's own form.  And
+    a charter is added to the mapping only where ``unfiled_depositories``
+    already placed it in an organisation that quarter, so a thrift is never
+    attributed to a firm that did not own it yet.
+    """
+    if tfr_frame.is_empty():
+        return charters, mapping, 0
+    filed = charters.select("rssd", "period").unique() if not charters.is_empty() else None
+    fresh = tfr_frame.drop("cert", strict=False)
+    if filed is not None:
+        fresh = fresh.join(filed, on=["rssd", "period"], how="anti")
+    extra = tfr_mapping(gaps, mapping)
+    if extra.is_empty() or fresh.is_empty():
+        return charters, mapping, 0
+    # Only the charter-quarters the mapping actually claims.
+    fresh = fresh.join(extra.select("rssd", "period").unique(), on=["rssd", "period"], how="semi")
+    if fresh.is_empty():
+        return charters, mapping, 0
+    extra = extra.join(fresh.select("rssd", "period").unique(), on=["rssd", "period"], how="semi")
+    if charters.is_empty():
+        combined = fresh
+    else:
+        # Every charter-quarter says which report it came off, so a consumer
+        # can drop the reconstructed ones with a filter rather than by
+        # reasoning about dates and regulators.
+        combined = pl.concat(
+            [charters.with_columns(pl.lit("call", dtype=pl.Utf8).alias("source")), fresh],
+            how="diagonal_relaxed",
+        )
+    mapped = (
+        pl.concat([mapping, extra], how="diagonal_relaxed")
+        if not mapping.is_empty()
+        else extra
+    )
+    return combined.sort(["rssd", "period"]), mapped.unique(), fresh.height
+
+
 def charter_frame(
     periods: list[str],
     rssds: set[int] | None = None,
@@ -532,15 +628,41 @@ def add_partition_check(frame: pl.DataFrame) -> pl.DataFrame:
     summed = pl.sum_horizontal([pl.col(c).fill_null(0.0) for c in leaves])
     if "loans_unearned_income" in frame.columns:
         summed = summed - pl.col("loans_unearned_income").fill_null(0.0)
+    # A bank-quarter carrying reconstructed thrift history has no RC-C total to
+    # cross-foot against.  The FDIC series supplies four loan categories and no
+    # Schedule RC-C, so the leaves include the thrift's book while
+    # ``loans_rcc_total`` sums only the Call Report filers -- and the residual
+    # then reads as an over-count, which is the sign this check reserves for a
+    # mapping bug.  Computing it anyway raised ``rcc_partition_over`` on 553
+    # bank-quarters that have nothing wrong with them.
+    #
+    # **The check and the backfill are mutually exclusive on a row**, and that
+    # is a real cost rather than a tidy-up: 796 of 3,763 bank-quarters lose the
+    # residual under ``--tfr``, and M&T at 2003Q1 -- the single genuine
+    # over-count in the panel, $8,000 of the filer's own rounding on a $70bn
+    # book -- is one of them, because that row carries a thrift too.  What is
+    # not lost is the evidence, which lives at charter level: the partition
+    # still runs over all 30,802 Call Report charter-quarters and still ties
+    # for 29,249 of them.  A build without ``--tfr`` keeps the holding-level
+    # check on every row.
+    checkable = (
+        pl.col("n_tfr_backfilled").fill_null(0) == 0
+        if "n_tfr_backfilled" in frame.columns
+        else pl.lit(True)
+    )
+    residual = pl.when(checkable).then(summed - pl.col("loans_rcc_total")).otherwise(None)
     return frame.with_columns(
-        (summed - pl.col("loans_rcc_total")).alias("rcc_residual"),
-        pl.when(pl.col("loans_rcc_total").abs() > 0)
+        residual.alias("rcc_residual"),
+        pl.when(checkable & (pl.col("loans_rcc_total").abs() > 0))
         .then((summed - pl.col("loans_rcc_total")) / pl.col("loans_rcc_total") * 100)
         .otherwise(None)
         .alias("rcc_residual_pct"),
         # What the categories leave unexplained, as a balance rather than a
         # diagnostic: the part of the book the mix does not describe.
-        (pl.col("loans_rcc_total") - summed).alias("loans_unallocated"),
+        pl.when(checkable)
+        .then(pl.col("loans_rcc_total") - summed)
+        .otherwise(None)
+        .alias("loans_unallocated"),
     )
 
 
@@ -553,6 +675,7 @@ NOT_SUMMED: frozenset[str] = frozenset(
     {
         "rssd", "period", "ticker", "bank", "holding_rssd", "form", "name",
         "via_rssd", "via_type", "failed_lineage", "rcn_total_built", "flow_reset",
+        "source",
     }
 )
 
@@ -610,6 +733,24 @@ def roll_up(charters: pl.DataFrame, mapping: pl.DataFrame) -> pl.DataFrame:
         aggs.append(pl.col("rcn_total_built").fill_null(False).any().alias("rcn_total_built"))
     if "flow_reset" in joined.columns:
         aggs.append(pl.col("flow_reset").fill_null(False).sum().alias("n_flow_resets"))
+    # How much of the organisation the uninsured-deposit estimate covers.
+    #
+    # RC-O item 2.a is reported only by filers that say they have a method to
+    # estimate it, so it is partial *within* a holding company as well as
+    # across the universe -- a group's small charters may report nothing while
+    # its large ones do.  The sum above would then be a floor with nothing to
+    # say so, which is the same hazard ``n_insured_not_filing`` exists for on
+    # the thrift side.  Weighted by deposits rather than by charter count,
+    # because a group of twenty charters whose one big bank reports is nearly
+    # complete and a charter count would call it 5%.
+    if {"deposits_uninsured", "deposits"} <= set(joined.columns):
+        reported = pl.col("deposits").filter(pl.col("deposits_uninsured").is_not_null())
+        aggs.append(
+            pl.when(pl.col("deposits").sum() > 0)
+            .then(reported.sum() / pl.col("deposits").sum() * 100)
+            .otherwise(None)
+            .alias("deposits_uninsured_coverage_pct")
+        )
     out = joined.group_by(["ticker", "bank", "holding_rssd", "period"]).agg(aggs)
     return out.rename({"holding_rssd": "rssd"}).sort(["ticker", "period"])
 
@@ -952,6 +1093,7 @@ def build(
     *,
     lineages: dict[str, lineage_mod.Lineage] | None = None,
     derived: bool = True,
+    tfr_frame: pl.DataFrame | None = None,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Build the charter-level and holding-company panels.
 
@@ -971,6 +1113,19 @@ def build(
     if charters.is_empty():
         return pl.DataFrame(), pl.DataFrame()
 
+    # The thrift backfill goes in *before* quarterizing, so its year-to-date
+    # charge-offs and recoveries are differenced by exactly the same rule as
+    # the Call Report's -- per charter, within the calendar year, and never
+    # across a gap.  It also has to be in before the rollup, which is the
+    # whole point: a holding company's summed loan book is what the missing
+    # thrift was missing from.
+    gaps = unfiled_depositories(periods, holdings, lineages)
+    n_tfr = 0
+    if tfr_frame is not None and not tfr_frame.is_empty():
+        charters, mapping, n_tfr = merge_tfr(charters, mapping, gaps, tfr_frame)
+        if n_tfr:
+            log.info("tfr: %d charter-quarters folded into the panel", n_tfr)
+
     pooled = lineage_mod.pooled_events(wanted) if lineages else None
     charters = quarterize(charters, pooled)
     charters = add_rcn_totals(charters)
@@ -986,10 +1141,25 @@ def build(
     if holding_panel.is_empty():
         return charter_panel.sort(["ticker", "rssd", "period"]), holding_panel
 
-    gaps = unfiled_depositories(periods, holdings, lineages)
     holding_panel = holding_panel.join(gaps, on=["ticker", "period"], how="left").with_columns(
         pl.col("n_insured_not_filing").fill_null(0)
     )
+    # ``n_insured_not_filing`` still counts what filed no Call Report, because
+    # that is what it means and a reader comparing builds should see the same
+    # number.  What changed is how much of it is now carried, so the recovery
+    # is a column of its own rather than a silent reduction of the gap.
+    if n_tfr:
+        recovered = (
+            charters.filter(pl.col("source") == "tfr")
+            .group_by("rssd", "period")
+            .agg(pl.len())
+            .join(mapping.select("ticker", "rssd", "period"), on=["rssd", "period"], how="inner")
+            .group_by("ticker", "period")
+            .agg(pl.col("rssd").n_unique().alias("n_tfr_backfilled"))
+        )
+        holding_panel = holding_panel.join(
+            recovered, on=["ticker", "period"], how="left"
+        ).with_columns(pl.col("n_tfr_backfilled").fill_null(0))
     if derived:
         holding_panel = add_derived(holding_panel)
         holding_panel = _order(holding_panel)

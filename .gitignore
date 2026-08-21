@@ -11,3 +11,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.tmp
+
+# The Pages artifact's copy of the published panels.  The originals live in
+# data/ and are committed; the workflow stages them under docs/ so the site's
+# download links resolve relative to the page.  Committing both would put the
+# same 16 MB in the repository twice.
+docs/data/
