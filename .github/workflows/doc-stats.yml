@@ -1,0 +1,120 @@
+name: Doc stats
+
+# The README and the wiki quote figures that are properties of a build -- row
+# counts, column counts, the window, the test count.  They drift the moment a
+# panel is rebuilt, and they drift *silently*: nothing renders differently when
+# a document claims 3,741 bank-quarters and the parquet beside it holds 3,763.
+#
+# So the numbers are not maintained by hand.  Each is wrapped in a sentinel and
+# rewritten from the committed panels on every push.
+on:
+  push:
+    branches: [main]
+    # Only the things a count could be derived from.  A prose-only edit does not
+    # need to re-run this, and re-running it on every push to any path would
+    # make the bot commit the most common event in the log.
+    paths:
+      - "data/*.parquet"
+      - "data/panel_stats.json"
+      - "README.md"
+      - "tests/**"
+      - "scripts/sync_doc_stats.py"
+      - ".github/workflows/doc-stats.yml"
+  pull_request:
+    paths:
+      - "data/*.parquet"
+      - "data/panel_stats.json"
+      - "README.md"
+      - "tests/**"
+      - "scripts/sync_doc_stats.py"
+  workflow_dispatch:
+
+# contents: write is needed to push the corrected README back, and to push the
+# wiki -- a repository's wiki is a second git repository behind the same token.
+permissions:
+  contents: write
+
+# The wiki push and the README push both write to a shared history.  Two runs
+# racing would interleave commits, so a queued run waits rather than cancels:
+# cancelling would leave the wiki updated and the README not, or the reverse.
+concurrency:
+  group: doc-stats
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install the project
+        run: uv sync --frozen
+
+      # Re-derive the facts before using them.  Row and column counts come
+      # straight from the committed panels; the test count comes from a
+      # collection pass, which is why tests/** is a trigger path.  Figures only
+      # a full build knows -- charter-quarters -- are carried forward from the
+      # committed file, since data/out/ is gitignored and absent here.
+      - name: Refresh the recorded statistics
+        run: uv run python scripts/sync_doc_stats.py --refresh-stats
+
+      # A pull request cannot push to the wiki and should not rewrite the
+      # contributor's branch, so it only reports.  A push to main fixes.
+      - name: Check the counts (pull request)
+        if: github.event_name == 'pull_request'
+        run: |
+          if ! git diff --quiet -- data/panel_stats.json; then
+            echo "::warning::data/panel_stats.json is out of date; a push to main will correct it"
+            git diff -- data/panel_stats.json
+          fi
+          uv run python scripts/sync_doc_stats.py --check
+
+      # The wiki is a separate git repository.  It is checked out beside the
+      # workspace so the same run can correct both from one set of figures --
+      # otherwise the README and the wiki can disagree with each other while
+      # each agrees with itself.
+      - name: Check out the wiki
+        if: github.event_name != 'pull_request'
+        run: |
+          git clone \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" \
+            "$RUNNER_TEMP/wiki"
+
+      - name: Rewrite the counts
+        if: github.event_name != 'pull_request'
+        run: uv run python scripts/sync_doc_stats.py --write --wiki "$RUNNER_TEMP/wiki"
+
+      - name: Commit the wiki, if it moved
+        if: github.event_name != 'pull_request'
+        working-directory: ${{ runner.temp }}/wiki
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "wiki counts already current"
+          else
+            git diff --stat
+            git commit -aqm "wiki: sync counts to the shipped panels"
+            git push -q
+          fi
+
+      # A push made with GITHUB_TOKEN does not trigger another workflow run, so
+      # this cannot loop.  [skip ci] is belt and braces for anything watching
+      # the repository through a different token.
+      - name: Commit the README, if it moved
+        if: github.event_name != 'pull_request'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- README.md data/panel_stats.json; then
+            echo "README and recorded statistics already current"
+          else
+            git diff --stat -- README.md data/panel_stats.json
+            git commit -qm "docs: sync counts to the shipped panels [skip ci]" \
+              -- README.md data/panel_stats.json
+            git push -q
+          fi
