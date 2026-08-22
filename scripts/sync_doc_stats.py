@@ -14,15 +14,17 @@ sentinel::
 and this script rewrites what sits between the markers.  Prose is untouched, so
 a sentence keeps reading like a sentence; only the number moves.
 
-Two facts are deliberately *not* automated:
+What can be automated
+---------------------
+The test is whether the artefacts carry *both halves* of a figure.  "72 of the
+72 non-filing depositories resolve, for 2,749 quarterly rows" is safe:
+``sought``, ``resolved`` and ``rows`` are all recorded by the same build, so the
+sentence stays internally consistent however it moves.
 
-* Figures inside a narrative build record -- what the 2001 extension measured at
-  the time it was written.  Those are observations with a date attached, not
-  descriptions of the current panel, and rewriting them would be falsifying a
-  record rather than updating a count.
-* Anything derived from a full build's ``data/out/`` artefacts that is not
-  reachable from the committed panels.  Those come via ``panel_stats.json``
-  instead -- see below.
+The 2013 build record fails that test and is left alone.  Its figures are paired
+with counterparts nothing records -- ``1,648 x 456``, ``29 of 31 banks``, quality
+flags ``363 -> 330``.  Refreshing one side of such a pair would state something
+that was never true of any build, which is worse than a stale number.
 
 Where the numbers come from
 ---------------------------
@@ -114,13 +116,74 @@ def _test_count() -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _build_record(info: dict) -> dict[str, Any]:
+    """The figures documents quote from one ``call_panel_build_info.json``."""
+    lineage = info.get("lineage")
+    lineage = lineage if isinstance(lineage, dict) else {}
+    partition = info.get("partition") or {}
+    thrift = info.get("thrift_gap")
+    thrift = thrift if isinstance(thrift, dict) else {}
+
+    delta = info.get("coverage_delta") or {}
+
+    record: dict[str, Any] = {
+        "bank_quarters": info["bank_quarters"],
+        "charter_quarters": info["charter_quarters"],
+        "columns": info["columns"],
+        "firms": info["firms"],
+        "periods": info["periods"],
+        "flag_counts": info.get("flag_counts") or {},
+        # What the lineage extension added, against the own-subtree baseline.
+        "coverage_delta": {
+            "before": delta.get("bank_quarters_before"),
+            "after": delta.get("bank_quarters_after"),
+            "with_predecessors": delta.get("bank_quarters_with_predecessors"),
+        },
+        "partition": {
+            "checked": partition.get("charter_quarters_checked"),
+            "tied": partition.get("charter_quarters_tied"),
+            "holding_not_checked": partition.get("holding_rows_not_checked"),
+        },
+        "lineage": {
+            "predecessors": lineage.get("predecessors"),
+            "fdic_assisted": (lineage.get("by_type") or {}).get("fdic_assisted"),
+            "acquisitions": lineage.get("acquisitions_by_relationship"),
+        },
+    }
+    if thrift:
+        record["thrift_gap"] = {
+            "sought": thrift.get("sought"),
+            "resolved": thrift.get("resolved"),
+            "rows": thrift.get("rows"),
+            "identities": thrift.get("identities") or {},
+        }
+    return record
+
+
 def refresh_stats() -> dict:
     """Rebuild ``panel_stats.json`` from a completed build's artefacts.
 
-    Run after ``build_call_panel.py``.  Reads the gitignored build info for the
-    facts the committed panels cannot answer, and re-derives everything else
-    from the panels so the file is never the only witness to a number.
+    Reads the gitignored build info for the facts the committed panels cannot
+    answer, and re-derives everything else from the panels so the file is never
+    the only witness to a number.
+
+    ``data/out/`` holds one build at a time, and the documents compare two --
+    the shipped ``--tfr`` panel against the plain one, because the thrift
+    backfill changes the row counts and costs the holding-level partition
+    check.  Each refresh files the build it finds under the variant its own
+    ``tfr`` flag names and carries the other forward, so::
+
+        build_call_panel.py        && sync_doc_stats.py --refresh-stats
+        build_call_panel.py --tfr  && sync_doc_stats.py --refresh-stats
+
+    records both.
     """
+    prior: dict[str, Any] = (
+        json.loads(STATS_PATH.read_text(encoding="utf-8"))
+        if STATS_PATH.exists()
+        else {}
+    )
+
     stats: dict[str, Any] = {
         "edgar": _panel_facts(ROOT / "data" / "panel.parquet"),
         "ffiec": _panel_facts(ROOT / "data" / "call_panel.parquet"),
@@ -129,33 +192,22 @@ def refresh_stats() -> dict:
         ROOT / "data" / "panel.parquet"
     )
 
+    # Carry both build records forward, then overwrite whichever one the
+    # artefacts on disk describe.
+    for variant in ("build_tfr", "build_plain"):
+        if variant in prior:
+            stats[variant] = prior[variant]
+
     info_path = ROOT / "data" / "out" / "call_panel_build_info.json"
     if info_path.exists():
         info = json.loads(info_path.read_text(encoding="utf-8"))
-        stats["ffiec"]["charter_quarters"] = info["charter_quarters"]
-        stats["ffiec"]["periods"] = info["periods"]
-        lineage = info.get("lineage") or {}
-        stats["lineage"] = {
-            "predecessors": lineage.get("predecessors"),
-            "fdic_assisted": (lineage.get("by_type") or {}).get("fdic_assisted"),
-        }
-    elif STATS_PATH.exists():
-        # No build artefacts here -- keep what is already recorded rather than
-        # dropping facts the documents depend on.
-        prior = json.loads(STATS_PATH.read_text(encoding="utf-8"))
-        for key in ("charter_quarters", "periods"):
-            if key in prior.get("ffiec", {}):
-                stats["ffiec"][key] = prior["ffiec"][key]
-        if "lineage" in prior:
-            stats["lineage"] = prior["lineage"]
+        variant = "build_tfr" if info.get("tfr") else "build_plain"
+        stats[variant] = _build_record(info)
 
     tests = _test_count()
-    if tests is not None:
-        stats["tests"] = tests
-    elif STATS_PATH.exists():
-        prior = json.loads(STATS_PATH.read_text(encoding="utf-8"))
-        if "tests" in prior:
-            stats["tests"] = prior["tests"]
+    stats["tests"] = tests if tests is not None else prior.get("tests")
+    if stats["tests"] is None:
+        del stats["tests"]
 
     STATS_PATH.write_text(json.dumps(stats, indent=2) + "\n", encoding="utf-8")
     return stats
@@ -188,6 +240,17 @@ def load_stats(verify: bool = True) -> dict:
                     f"data/{'call_panel' if panel == 'ffiec' else 'panel'}.parquet "
                     f"says {actual!r}.  Run --refresh-stats."
                 )
+
+    # The shipped panel is the --tfr build, so that build record must describe
+    # the committed parquet.  Without this a stale build record would be copied
+    # into the documents as confidently as a current one.
+    shipped = (stats.get("build_tfr") or {}).get("bank_quarters")
+    if shipped is not None and shipped != live["ffiec"]["rows"]:
+        raise SystemExit(
+            f"panel_stats.json is stale: build_tfr.bank_quarters says {shipped!r}, "
+            f"data/call_panel.parquet has {live['ffiec']['rows']!r} rows.  "
+            f"Rebuild with --tfr and run --refresh-stats."
+        )
     return stats
 
 
@@ -215,12 +278,73 @@ def values(stats: dict) -> dict[str, str]:
             f"{f['rows']:,} rows, {f['banks']} firms, {f['columns']} columns"
         ),
     }
-    if "charter_quarters" in f:
-        out["ffiec-charter-quarters"] = f"{f['charter_quarters']:,}"
-    if "periods" in f:
-        out["ffiec-periods"] = f"{f['periods']}"
     if "tests" in stats:
         out["tests"] = f"{stats['tests']}"
+
+    # The shipped panel is the --tfr build, so its figures are the unqualified
+    # ones.  The plain build is the comparison the thrift-gap tables are built
+    # on, and is prefixed.
+    tfr = stats.get("build_tfr") or {}
+    plain = stats.get("build_plain") or {}
+
+    def emit(prefix: str, rec: dict) -> None:
+        if not rec:
+            return
+        if rec.get("bank_quarters") is not None:
+            out[f"{prefix}bank-quarters"] = f"{rec['bank_quarters']:,}"
+        if rec.get("charter_quarters") is not None:
+            out[f"{prefix}charter-quarters"] = f"{rec['charter_quarters']:,}"
+        if rec.get("periods") is not None:
+            out[f"{prefix}periods"] = f"{rec['periods']}"
+        if rec.get("columns") is not None:
+            out[f"{prefix}build-columns"] = f"{rec['columns']:,}"
+        if rec.get("firms") is not None:
+            out[f"{prefix}firms"] = f"{rec['firms']}"
+        delta = rec.get("coverage_delta") or {}
+        if delta.get("before") is not None:
+            out[f"{prefix}delta-before"] = f"{delta['before']:,}"
+        if delta.get("after") is not None:
+            out[f"{prefix}delta-after"] = f"{delta['after']:,}"
+        if delta.get("before") is not None and delta.get("after") is not None:
+            out[f"{prefix}delta-added"] = f"{delta['after'] - delta['before']:,}"
+        if delta.get("with_predecessors") is not None:
+            out[f"{prefix}delta-with-predecessors"] = (
+                f"{delta['with_predecessors']:,}"
+            )
+        part = rec.get("partition") or {}
+        if part.get("checked") is not None:
+            out[f"{prefix}partition-checked"] = f"{part['checked']:,}"
+        if part.get("tied") is not None:
+            out[f"{prefix}partition-tied"] = f"{part['tied']:,}"
+            if part.get("checked"):
+                out[f"{prefix}partition-tied-pct"] = (
+                    f"{part['tied'] / part['checked'] * 100:.1f}"
+                )
+        if part.get("holding_not_checked") is not None:
+            out[f"{prefix}partition-unchecked"] = f"{part['holding_not_checked']:,}"
+        for flag, n in (rec.get("flag_counts") or {}).items():
+            out[f"{prefix}flag-{flag.replace('_', '-')}"] = f"{n:,}"
+
+    emit("ffiec-", tfr)
+    emit("plain-", plain)
+
+    # Lineage and the thrift backfill are properties of the universe and the
+    # registries, not of which build ran -- take them from whichever record has
+    # them, preferring the shipped one.
+    for rec in (tfr, plain):
+        for key, value in (rec.get("lineage") or {}).items():
+            if value is not None:
+                out.setdefault(f"lineage-{key.replace('_', '-')}", f"{value:,}")
+        thrift = rec.get("thrift_gap") or {}
+        for key in ("sought", "resolved", "rows"):
+            if thrift.get(key) is not None:
+                out.setdefault(f"thrift-{key}", f"{thrift[key]:,}")
+        for name, pair in (thrift.get("identities") or {}).items():
+            if isinstance(pair, list) and len(pair) == 2:
+                out.setdefault(
+                    f"thrift-identity-{name.replace('_', '-')}",
+                    f"{pair[0]:,} / {pair[1]:,}",
+                )
     return out
 
 

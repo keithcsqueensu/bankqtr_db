@@ -12,13 +12,91 @@
     "columns": 279,
     "banks": 38,
     "first_quarter": "2001Q1",
-    "last_quarter": "2026Q2",
-    "charter_quarters": 32283,
-    "periods": 102
+    "last_quarter": "2026Q2"
   },
-  "lineage": {
-    "predecessors": 1654,
-    "fdic_assisted": 95
+  "build_tfr": {
+    "bank_quarters": 3763,
+    "charter_quarters": 32283,
+    "columns": 279,
+    "firms": 38,
+    "periods": 102,
+    "flag_counts": {
+      "insured_depository_not_filing": 849,
+      "nonaccrual_exceeds_loans": 1,
+      "predecessor_failed": 507,
+      "predecessor_history": 1951,
+      "rcc_partition_under": 1048
+    },
+    "coverage_delta": {
+      "before": 1929,
+      "after": 3763,
+      "with_predecessors": 1951
+    },
+    "partition": {
+      "checked": 30802,
+      "tied": 29249,
+      "holding_not_checked": 796
+    },
+    "lineage": {
+      "predecessors": 1654,
+      "fdic_assisted": 95,
+      "acquisitions": 125
+    },
+    "thrift_gap": {
+      "sought": 72,
+      "resolved": 72,
+      "rows": 2749,
+      "identities": {
+        "gross_less_allowance_is_net": [
+          2749,
+          2749
+        ],
+        "noncurrent_is_nonaccrual_plus_90": [
+          2742,
+          2749
+        ],
+        "charge_offs_less_recoveries_is_net": [
+          2749,
+          2749
+        ]
+      }
+    }
+  },
+  "build_plain": {
+    "bank_quarters": 3676,
+    "charter_quarters": 30802,
+    "columns": 278,
+    "firms": 38,
+    "periods": 102,
+    "flag_counts": {
+      "insured_depository_not_filing": 762,
+      "nonaccrual_exceeds_loans": 1,
+      "predecessor_failed": 507,
+      "predecessor_history": 1951,
+      "rcc_partition_over": 1,
+      "rcc_partition_under": 1308
+    },
+    "coverage_delta": {
+      "before": 1929,
+      "after": 3676,
+      "with_predecessors": 1951
+    },
+    "partition": {
+      "checked": 30802,
+      "tied": 29249,
+      "holding_not_checked": 0
+    },
+    "lineage": {
+      "predecessors": 1654,
+      "fdic_assisted": 95,
+      "acquisitions": 125
+    },
+    "thrift_gap": {
+      "sought": null,
+      "resolved": null,
+      "rows": null,
+      "identities": {}
+    }
   },
   "tests": 308
 }

@@ -623,11 +623,25 @@ def main(argv: list[str] | None = None) -> int:
         charters.height,
         charters["rssd"].n_unique(),
     )
+    # Recorded, not merely logged: the documents quote these, and a figure that
+    # exists only in a log line is one nothing can check a document against.
+    partition_summary: dict[str, int] | None = None
     if "rcc_residual" in charters.columns:
         exact = int(
             (charters["rcc_residual"].abs() <= PARTITION_TOLERANCE_USD).sum()
         )
         checked = int(charters["rcc_residual"].is_not_null().sum())
+        partition_summary = {
+            "charter_quarters_checked": checked,
+            "charter_quarters_tied": exact,
+            # Holding-company rows left null because a TFR-backfilled charter
+            # makes the RC-C cross-foot meaningless for that bank-quarter.
+            "holding_rows_not_checked": (
+                int(holding_panel["rcc_residual"].is_null().sum())
+                if "rcc_residual" in holding_panel.columns
+                else 0
+            ),
+        }
         log.info(
             "RC-C partition ties exactly for %d of %d charter-quarters (%.1f%%)",
             exact,
@@ -703,6 +717,11 @@ def main(argv: list[str] | None = None) -> int:
         "populated_cells": _filled_cells(holding_panel),
         "flags": 0 if flagged.is_empty() else flagged.height,
         "flag_counts": flag_counts,
+        # Which build this is.  The thrift backfill changes the row counts and
+        # costs the holding-level partition check, so a figure quoted from a
+        # build is only meaningful beside the flag that produced it.
+        "tfr": bool(args.tfr),
+        "partition": partition_summary,
         "crosscheck_rows": diff_rows,
         "unit_scale": mdrm.UNIT_SCALE,
         "comparators": bool(args.comparators),
