@@ -6,8 +6,8 @@ provenance and coverage reporting attached.
 
 | Package | Source | Entity | Output | Window |
 |---|---|---|---|---|
-| `bankqtr_db` | SEC EDGAR — XBRL, filing HTML, IR supplements | the holding company, as it reports itself | `panel.parquet` | 2013Q1 – 2026Q2 |
-| `callrpt_db` | FFIEC — CDR bulk Call Reports, NIC structure data | its bank charters, summed | `call_panel.parquet` | 2001Q1 – 2026Q2 |
+| `bankqtr_db` | SEC EDGAR — XBRL, filing HTML, IR supplements | the holding company, as it reports itself | `panel.parquet` | <!--stats:edgar-window-->2013Q1 – 2026Q2<!--/stats--> |
+| `callrpt_db` | FFIEC — CDR bulk Call Reports, NIC structure data | its bank charters, summed | `call_panel.parquet` | <!--stats:ffiec-window-->2001Q1 – 2026Q2<!--/stats--> |
 
 They are not redundant. The EDGAR panel is what the market sees and covers the
 whole consolidated firm; the FFIEC panel is a regulatory filing on a fixed form,
@@ -55,8 +55,8 @@ Both builds land in `data/out/`:
 
 | File | Contents |
 |---|---|
-| `panel.parquet` / `.csv` | the EDGAR bank-quarter panel — 1,648 rows, 31 banks, 548 columns |
-| `call_panel.parquet` / `.csv` | the FFIEC panel — 3,763 rows, 38 firms, 279 columns |
+| `panel.parquet` / `.csv` | the EDGAR bank-quarter panel — <!--stats:edgar-extent-->1,648 rows, 31 banks, 548 columns<!--/stats--> |
+| `call_panel.parquet` / `.csv` | the FFIEC panel — <!--stats:ffiec-extent-->3,763 rows, 38 firms, 279 columns<!--/stats--> |
 | `call_panel_charters.parquet` | one row per bank charter per quarter, with its predecessor |
 | `panel_coverage.csv` / `call_panel_coverage.csv` | per bank and variable: how many quarters are populated |
 | `panel_flags.csv` / `call_panel_flags.csv` | bank-quarters failing a sanity check |
@@ -105,7 +105,7 @@ uv run pytest tests/ -q
 uv run ruff check .
 ```
 
-308 tests across both builds. Every one corresponds to a defect that produced
+<!--stats:tests-->308<!--/stats--> tests across both builds. Every one corresponds to a defect that produced
 **plausible but wrong** numbers during development — the dangerous kind, since
 nothing raises and the panel still renders. The catalogue of what they guard is
 in the wiki: **[Traps](https://github.com/keithcsqueensu/bankqtr_db/wiki/Traps)**.
@@ -131,6 +131,14 @@ in the wiki: **[Traps](https://github.com/keithcsqueensu/bankqtr_db/wiki/Traps)*
 | [Traps](https://github.com/keithcsqueensu/bankqtr_db/wiki/Traps) | Every catalogued failure, indexed by failure mode |
 | [Testing](https://github.com/keithcsqueensu/bankqtr_db/wiki/Testing) | The two suites and what they pin |
 | [Extending](https://github.com/keithcsqueensu/bankqtr_db/wiki/Extending) | Adding a variable, a bank, a disclosure or an era |
+
+## A note on the counts in this file
+
+Figures that describe a build rather than the text — row counts, columns, the
+window, the test count — are wrapped in sentinels and rewritten from the
+committed panels by `scripts/sync_doc_stats.py`, which CI runs on every push to
+`main`. Do not edit them by hand; run `--write`. See
+[Extending](https://github.com/keithcsqueensu/bankqtr_db/wiki/Extending#counts-quoted-in-prose).
 
 ## Layout
 

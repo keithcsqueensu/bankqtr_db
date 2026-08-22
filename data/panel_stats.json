@@ -1,0 +1,24 @@
+{
+  "edgar": {
+    "rows": 1648,
+    "columns": 548,
+    "banks": 31,
+    "first_quarter": "2013Q1",
+    "last_quarter": "2026Q2",
+    "provenance_columns": 271
+  },
+  "ffiec": {
+    "rows": 3763,
+    "columns": 279,
+    "banks": 38,
+    "first_quarter": "2001Q1",
+    "last_quarter": "2026Q2",
+    "charter_quarters": 32283,
+    "periods": 102
+  },
+  "lineage": {
+    "predecessors": 1654,
+    "fdic_assisted": 95
+  },
+  "tests": 308
+}
