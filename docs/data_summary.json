@@ -1,5 +1,5 @@
 {
-  "generated_utc": "2026-08-21 23:14 UTC",
+  "generated_utc": "2026-08-22 01:04 UTC",
   "ffiec": {
     "rows": 3763,
     "columns": 279,
@@ -10,13 +10,13 @@
     "csv_bytes": 11163296
   },
   "edgar": {
-    "rows": 781,
-    "columns": 530,
+    "rows": 1648,
+    "columns": 548,
     "banks": 31,
-    "start": "2020-03-31",
+    "start": "2013-03-30",
     "end": "2026-06-30",
-    "parquet_bytes": 508821,
-    "csv_bytes": 1441035
+    "parquet_bytes": 796451,
+    "csv_bytes": 2953594
   },
   "rate_audit": [
     {

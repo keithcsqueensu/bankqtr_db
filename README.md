@@ -43,14 +43,27 @@ See [Going back to 2001](#going-back-to-2001) and
 [docs/extending-to-2001.md](docs/extending-to-2001.md) before using the rows
 before 2013.
 
-The XBRL half of the panel reaches back to **2013**. The HTML and IR fallbacks
-do not — both were written against post-2020 layouts — so hold them at 2020
-even when the XBRL window is wider:
+The XBRL half of the panel reaches back to **2013**, and so, now, does the HTML
+fallback:
 
 ```bash
 uv run python scripts/fetch_instances.py --since 2013-01-01     # ~1,670 docs, 670 MB
-uv run python scripts/build_panel.py --since 2013-01-01     --html-fallback --html-since 2020-01-01 --ir
+uv run python scripts/build_panel.py --since 2013-01-01     --html-fallback --html-since 2013-01-01 --ir
 ```
+
+The HTML window used to be held at 2020 on the grounds that the row-label
+patterns were verified against post-2020 layouts. That was measured rather
+than re-asserted: over the 423 cached filings the past-due grid yields **661
+readings across 11 banks in 2012–2019**, and the 641 cells they and the older
+specs contribute to the pre-2020 rows survive scale inference and both of
+`reconcile`'s rejection rules — none of the 1,333 grid values exceeds its
+bank's own loan book, and none is negative. `--html-since 2020-01-01` still
+does the old thing if you want the narrower window.
+
+**The origination-year columns stop at 2020 whatever you pass**, and not
+because of the parser: CECL vintage disclosure is ASU 2016-13, so the table
+does not exist in a 2019 filing. The spec finds 1,020 readings from 2020 on
+and exactly zero before, which is the correct answer rather than a gap.
 
 See [docs/extending-to-2013.md](docs/extending-to-2013.md) for what the pre-CECL
 dialect required and what it changed, and *Reading across 2020Q1* below before

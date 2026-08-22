@@ -10,10 +10,12 @@ cannot describe a different dataset from the one a colleague grabs.
 
 Everything is drawn from the **FFIEC panel**.  That is a deliberate choice and
 not the only one available: the EDGAR panel is in ``data/panel.parquet`` and is
-offered beside it, but it starts at 2020Q1, so it cannot show the GFC that two
+offered beside it.  It reaches back to 2013Q1 -- further than an earlier version
+of this note claimed -- but 2013 is still nine years short of the GFC that two
 of these charts exist to put in view, and it carries no ``loans_average``
-column for the charge-off cross-check below.  Every chart is captioned with its
-source so the two are never confused.
+column for the charge-off cross-check below.  Both reasons hold at either
+start date.  Every chart is captioned with its source so the two are never
+confused.
 
 The charge-off rates are checked before they are drawn
 ------------------------------------------------------
